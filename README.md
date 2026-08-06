@@ -275,6 +275,13 @@ chmod 755 /data/adb/sing-box/box.sh
 4. **日志分离**：脚本日志和 sing-box 日志是独立的文件
 5. **开机自启**：如需开机自启，必须安装 service.d 脚本
 
+## 🙏 致谢
+
+感谢以下开发者对本项目的贡献和参考：
+
+- [**CHIZI-0618**](https://github.com/CHIZI-0618) 
+- [**Yuu518**](https://github.com/Yuu518) 
+
 ## 📄 许可证
 
 MIT License
