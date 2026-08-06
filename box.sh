@@ -303,7 +303,45 @@ stop() {
 }
 
 restart() {
-    stop || { error_log "Stop failed, restart cancelled"; return 1; }
+    log "Restarting ${SERVICE_NAME}..."
+    
+    # 1. 获取 PID
+    bin_pid=$(get_pid)
+    
+    # 2. 如果 PID 文件存在但进程已死，清理残留
+    if [ -f "${PID_FILE}" ]; then
+        local old_pid=$(cat "${PID_FILE}" 2>/dev/null | tr -d ' \r\n')
+        if [ -n "${old_pid}" ] && ! kill -0 "${old_pid}" 2>/dev/null; then
+            log "Cleaning stale PID file (PID ${old_pid} not found)"
+            clear_pid
+        fi
+    fi
+    
+    # 3. 如果有运行中的进程，停止它
+    if [ -n "${bin_pid}" ] && kill -0 "${bin_pid}" 2>/dev/null; then
+        log "Stopping existing process (PID: ${bin_pid})..."
+        kill "${bin_pid}" 2>/dev/null
+        local i=0
+        while [ "${i}" -lt "${STOP_TIMEOUT}" ]; do
+            kill -0 "${bin_pid}" 2>/dev/null || break
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "${bin_pid}" 2>/dev/null; then
+            log "Force killing..."
+            kill -9 "${bin_pid}" 2>/dev/null
+            sleep 1
+        fi
+        clear_pid
+    fi
+    
+    # 4. 清理锁
+    rmdir "${LOCK_DIR}" 2>/dev/null
+    
+    # 5. 刷新缓存
+    sync
+    
+    # 6. 启动
     sleep 1
     start
 }
