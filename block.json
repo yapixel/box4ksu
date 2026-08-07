@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "rules": [
+    {
+//      "domain_suffix": [
+//        ".v1d.szbdyd.com",
+//        ".mcdn.bilivideo.cn",
+//      ],
+      "domain": [
+        "otheve.beacon.qq.com",
+        "oth.str.mdt.qq.com",
+        "get.sogou.com",
+        "shouji.sogou.com",
+        "account.sogou.com",
+        "pinyin.sogou.com",
+        "ime.sogou.com",
+        "macime.sogou.com",
+        "mistymeat.com"
+
+//        "upos-hz-mirrorakam.akamaized.net",
+      ]
+    }
+  ]
+}
