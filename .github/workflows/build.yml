@@ -19,14 +19,8 @@ jobs:
         include:
           - target: aarch64-linux-musl
             arch: arm64
-          - target: arm-linux-musleabi
-            arch: armv7
           - target: x86_64-linux-musl
             arch: amd64
-          - target: i386-linux-musl
-            arch: 386
-          - target: riscv64-linux-musl
-            arch: riscv64
 
     steps:
       - name: Checkout repository
