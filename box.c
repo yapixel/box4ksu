@@ -14,28 +14,168 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <ctype.h>
+#include <grp.h>
+#include <pwd.h>
 
-// ================= Configuration =================
-#define SERVICE_NAME    "sing-box"
-#define WORK_DIR        "/data/adb/" SERVICE_NAME
-#define BIN_PATH        WORK_DIR "/bin/" SERVICE_NAME
-#define PID_FILE        WORK_DIR "/" SERVICE_NAME ".pid"
-#define LOG_DIR         WORK_DIR "/logs"
-#define LOG_FILE        LOG_DIR "/run.log"
-#define ERROR_LOG       LOG_DIR "/run_error.log"
-#define SINGBOX_LOG     LOG_DIR "/sing-box.log"
-#define LOCK_DIR        WORK_DIR "/.box.lock"
+typedef struct {
+    char service_name[128];
+    char work_dir[256];
+    char bin_path[256];
+    char pid_file[256];
+    char log_dir[256];
+    char log_file[256];
+    char error_log[256];
+    char singbox_log[256];
+    char lock_dir[256];
+    char run_user[128];
+    long max_log_size;
+    int stop_timeout;
+    int start_timeout;
+    int check_config;
+    long nofile_limit;
+} Config;
 
-#define RUN_USER        "root:net_admin"
-#define MAX_LOG_SIZE    1048576L  // 1MB
-#define STOP_TIMEOUT    10
-#define START_TIMEOUT   3
-#define CHECK_CONFIG    0
-#define NOFILE_LIMIT    1000000L
+static Config g_cfg;
+
+#define SERVICE_NAME    g_cfg.service_name
+#define WORK_DIR        g_cfg.work_dir
+#define BIN_PATH        g_cfg.bin_path
+#define PID_FILE        g_cfg.pid_file
+#define LOG_DIR         g_cfg.log_dir
+#define LOG_FILE        g_cfg.log_file
+#define ERROR_LOG       g_cfg.error_log
+#define SINGBOX_LOG     g_cfg.singbox_log
+#define LOCK_DIR        g_cfg.lock_dir
+#define RUN_USER        g_cfg.run_user
+#define MAX_LOG_SIZE    g_cfg.max_log_size
+#define STOP_TIMEOUT    g_cfg.stop_timeout
+#define START_TIMEOUT   g_cfg.start_timeout
+#define CHECK_CONFIG    g_cfg.check_config
+#define NOFILE_LIMIT    g_cfg.nofile_limit
 
 static int g_lock_acquired = 0;
 
-// ================= Utility Functions =================
+static pid_t get_pid(void);
+static void clear_pid(void);
+static void release_lock(void);
+static int display_status(void);
+static int do_check(void);
+static int start_service(void);
+
+static char *trim_str(char *str) {
+    while (isspace((unsigned char)*str)) str++;
+    if (*str == 0) return str;
+    char *end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+    return str;
+}
+
+static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir) {
+    line = trim_str(line);
+    if (line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return;
+
+    char *eq = strchr(line, '=');
+    if (!eq) return;
+
+    *eq = '\0';
+    char *key = trim_str(line);
+    char *val = eq + 1;
+
+    char *comment = strpbrk(val, "#;");
+    if (comment) *comment = '\0';
+    val = trim_str(val);
+
+    size_t val_len = strlen(val);
+    if (val_len >= 2 && ((val[0] == '"' && val[val_len - 1] == '"') || (val[0] == '\'' && val[val_len - 1] == '\''))) {
+        val[val_len - 1] = '\0';
+        val++;
+        val = trim_str(val);
+    }
+
+    if (strcasecmp(key, "service_name") == 0) {
+        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%s", val);
+    } else if (strcasecmp(key, "work_dir") == 0) {
+        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", val);
+    } else if (strcasecmp(key, "bin_path") == 0) {
+        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s", val);
+        *has_bin = 1;
+    } else if (strcasecmp(key, "pid_file") == 0) {
+        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s", val);
+        *has_pid = 1;
+    } else if (strcasecmp(key, "log_dir") == 0) {
+        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s", val);
+        *has_logdir = 1;
+    } else if (strcasecmp(key, "log_file") == 0) {
+        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s", val);
+        *has_logfile = 1;
+    } else if (strcasecmp(key, "error_log") == 0) {
+        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s", val);
+        *has_errlog = 1;
+    } else if (strcasecmp(key, "singbox_log") == 0) {
+        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s", val);
+        *has_sblog = 1;
+    } else if (strcasecmp(key, "lock_dir") == 0) {
+        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s", val);
+        *has_lockdir = 1;
+    } else if (strcasecmp(key, "run_user") == 0) {
+        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", val);
+    } else if (strcasecmp(key, "max_log_size") == 0) {
+        g_cfg.max_log_size = atol(val);
+    } else if (strcasecmp(key, "stop_timeout") == 0) {
+        g_cfg.stop_timeout = atoi(val);
+    } else if (strcasecmp(key, "start_timeout") == 0) {
+        g_cfg.start_timeout = atoi(val);
+    } else if (strcasecmp(key, "check_config") == 0) {
+        g_cfg.check_config = atoi(val);
+    } else if (strcasecmp(key, "nofile_limit") == 0) {
+        g_cfg.nofile_limit = atol(val);
+    }
+}
+
+static void load_config(void) {
+    snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "sing-box");
+    snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/sing-box");
+    snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "root:net_admin");
+    g_cfg.max_log_size = 1048576L;
+    g_cfg.stop_timeout = 10;
+    g_cfg.start_timeout = 3;
+    g_cfg.check_config = 0;
+    g_cfg.nofile_limit = 1000000L;
+
+    int has_bin = 0, has_pid = 0, has_logdir = 0, has_logfile = 0, has_errlog = 0, has_sblog = 0, has_lockdir = 0;
+
+    const char *candidates[] = {
+        "box.ini",
+        "bix.ini",
+        "/data/adb/sing-box/box.ini",
+        "/data/adb/sing-box/bix.ini",
+        "/data/adb/box.ini",
+        "/data/adb/bix.ini",
+        NULL
+    };
+
+    for (int i = 0; candidates[i] != NULL; i++) {
+        FILE *f = fopen(candidates[i], "r");
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof(line), f)) {
+                parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir);
+            }
+            fclose(f);
+            break;
+        }
+    }
+
+    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s/bin/%s", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s/%s.pid", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s/logs", g_cfg.work_dir);
+    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s/run.log", g_cfg.log_dir);
+    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s/run_error.log", g_cfg.log_dir);
+    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s/sing-box.log", g_cfg.log_dir);
+    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s/.box.lock", g_cfg.work_dir);
+}
+
 static void ts(char *buffer, size_t size) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
@@ -44,9 +184,7 @@ static void ts(char *buffer, size_t size) {
 
 static void rotate_log(const char *filepath) {
     struct stat st;
-    if (stat(filepath, &st) != 0) {
-        return;
-    }
+    if (stat(filepath, &st) != 0) return;
     if (st.st_size > MAX_LOG_SIZE) {
         char backup_path[512];
         snprintf(backup_path, sizeof(backup_path), "%s.1", filepath);
@@ -112,11 +250,12 @@ static void create_dirs_recursive(const char *path) {
     mkdir(temp, 0755);
 }
 
-// ================= Environment Validation =================
 static void prepare_env(void) {
     create_dirs_recursive(WORK_DIR);
     create_dirs_recursive(LOG_DIR);
-    create_dirs_recursive(WORK_DIR "/bin");
+    char bin_dir[512];
+    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", WORK_DIR);
+    create_dirs_recursive(bin_dir);
 
     if (geteuid() != 0 && getuid() != 0) {
         char timestamp[64];
@@ -150,7 +289,6 @@ static void acquire_lock(void) {
         struct stat st;
         if (stat(LOCK_DIR, &st) == 0) {
             time_t now = time(NULL);
-            // If lock dir is older than 60 seconds (1 min), remove it
             if (difftime(now, st.st_mtime) > 60.0) {
                 rmdir(LOCK_DIR);
                 continue;
@@ -169,72 +307,14 @@ static void acquire_lock(void) {
     signal(SIGTERM, signal_lock_cleanup);
 }
 
-// ================= Process Identification =================
-static pid_t find_pid_by_name(const char *name) {
-    DIR *dir = opendir("/proc");
-    if (dir) {
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-            if (!isdigit(entry->d_name[0])) continue;
-            pid_t pid = atoi(entry->d_name);
-
-            // 1. Try /proc/<pid>/exe readlink
-            char exe_path[256];
-            char link_target[512];
-            snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", pid);
-            ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
-            if (len > 0) {
-                link_target[len] = '\0';
-                if (strstr(link_target, name) != NULL) {
-                    closedir(dir);
-                    return pid;
-                }
-            }
-
-            // 2. Try /proc/<pid>/comm
-            char comm_path[256];
-            snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", pid);
-            FILE *fcomm = fopen(comm_path, "r");
-            if (fcomm) {
-                char comm_buf[64] = {0};
-                if (fgets(comm_buf, sizeof(comm_buf), fcomm)) {
-                    comm_buf[strcspn(comm_buf, "\r\n")] = 0;
-                    if (strcmp(comm_buf, name) == 0) {
-                        fclose(fcomm);
-                        closedir(dir);
-                        return pid;
-                    }
-                }
-                fclose(fcomm);
-            }
-        }
-        closedir(dir);
-    }
-
-    // 3. Fallback to busybox pidof
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "busybox pidof %s 2>/dev/null | awk '{print $1}'", name);
-    FILE *fp = popen(cmd, "r");
-    if (fp) {
-        pid_t p = -1;
-        if (fscanf(fp, "%d", &p) == 1 && p > 0) {
-            pclose(fp);
-            return p;
-        }
-        pclose(fp);
-    }
-
-    return -1;
-}
-
 static pid_t get_pid(void) {
-    // 1. Check PID_FILE first
     FILE *f = fopen(PID_FILE, "r");
     if (f) {
         pid_t p = -1;
         if (fscanf(f, "%d", &p) == 1 && p > 0) {
             fclose(f);
             if (kill(p, 0) == 0) {
+                // 1. Try /proc/<p>/exe readlink
                 char exe_path[256];
                 char link_target[512];
                 snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", p);
@@ -244,6 +324,22 @@ static pid_t get_pid(void) {
                     if (strstr(link_target, SERVICE_NAME) != NULL) {
                         return p;
                     }
+                } else {
+                    // 2. Fallback: check /proc/<p>/comm
+                    char comm_path[256];
+                    snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
+                    FILE *fcomm = fopen(comm_path, "r");
+                    if (fcomm) {
+                        char comm_buf[64] = {0};
+                        if (fgets(comm_buf, sizeof(comm_buf), fcomm)) {
+                            comm_buf[strcspn(comm_buf, "\r\n")] = 0;
+                            if (strcmp(comm_buf, SERVICE_NAME) == 0) {
+                                fclose(fcomm);
+                                return p;
+                            }
+                        }
+                        fclose(fcomm);
+                    }
                 }
             }
         } else {
@@ -251,15 +347,24 @@ static pid_t get_pid(void) {
         }
     }
 
-    // 2. Search processes in /proc
-    pid_t p = find_pid_by_name(SERVICE_NAME);
-    if (p > 0 && kill(p, 0) == 0) {
-        FILE *pf = fopen(PID_FILE, "w");
-        if (pf) {
-            fprintf(pf, "%d\n", p);
-            fclose(pf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "busybox pidof %s 2>/dev/null | awk '{print $1}'", SERVICE_NAME);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        pid_t p = -1;
+        if (fscanf(fp, "%d", &p) == 1 && p > 0) {
+            pclose(fp);
+            if (kill(p, 0) == 0) {
+                FILE *pf = fopen(PID_FILE, "w");
+                if (pf) {
+                    fprintf(pf, "%d\n", p);
+                    fclose(pf);
+                }
+                return p;
+            }
+        } else {
+            pclose(fp);
         }
-        return p;
     }
 
     return -1;
@@ -273,7 +378,6 @@ static void clear_pid(void) {
     unlink(PID_FILE);
 }
 
-// ================= Status Display =================
 static void fmt_mem(long long kb, char *buf, size_t size) {
     if (kb >= 1048576LL) {
         snprintf(buf, size, "%.2f GB", (double)kb / 1048576.0);
@@ -307,7 +411,6 @@ static int display_status(void) {
 
     log_info("%s service is running (PID: %d)", SERVICE_NAME, pid);
 
-    // Memory usage
     char status_path[256];
     snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
     FILE *f = fopen(status_path, "r");
@@ -328,14 +431,12 @@ static int display_status(void) {
         }
     }
 
-    // CPU usage via `ps -p <pid> -o %CPU`
     char ps_cmd[256];
     snprintf(ps_cmd, sizeof(ps_cmd), "ps -p %d -o %%CPU 2>/dev/null | tail -n 1 | tr -d ' %%'", pid);
     FILE *ps_fp = popen(ps_cmd, "r");
     if (ps_fp) {
         char cpu_buf[64] = {0};
         if (fgets(cpu_buf, sizeof(cpu_buf), ps_fp) && strlen(cpu_buf) > 0) {
-            // Trim trailing newline
             cpu_buf[strcspn(cpu_buf, "\r\n")] = 0;
             if (strlen(cpu_buf) > 0 && strcmp(cpu_buf, "-") != 0) {
                 log_info("CPU usage: %s%%", cpu_buf);
@@ -350,7 +451,6 @@ static int display_status(void) {
         log_info("CPU usage: unavailable");
     }
 
-    // Process uptime
     FILE *uptime_f = fopen("/proc/uptime", "r");
     if (uptime_f) {
         double sys_uptime = 0;
@@ -390,7 +490,6 @@ static int display_status(void) {
         fclose(uptime_f);
     }
 
-    // Network sockets
     char fd_dir[256];
     snprintf(fd_dir, sizeof(fd_dir), "/proc/%d/fd", pid);
     DIR *dir = opendir(fd_dir);
@@ -416,7 +515,6 @@ static int display_status(void) {
         }
     }
 
-    // Disk I/O
     char io_path[256];
     snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
     FILE *io_f = fopen(io_path, "r");
@@ -438,7 +536,6 @@ static int display_status(void) {
         }
     }
 
-    // Write back PID to PID_FILE
     FILE *pf = fopen(PID_FILE, "w");
     if (pf) {
         fprintf(pf, "%d\n", pid);
@@ -448,7 +545,6 @@ static int display_status(void) {
     return 0;
 }
 
-// ================= Configuration Validation =================
 static int do_check(void) {
     if (access(BIN_PATH, X_OK) != 0) {
         log_error("Binary not found or not executable: %s", BIN_PATH);
@@ -476,7 +572,25 @@ static int do_check(void) {
     return 0;
 }
 
-// ================= Core Operations =================
+static void check_stale_pid(void) {
+    if (access(PID_FILE, F_OK) == 0) {
+        FILE *f = fopen(PID_FILE, "r");
+        if (f) {
+            pid_t old_pid = -1;
+            if (fscanf(f, "%d", &old_pid) == 1 && old_pid > 0) {
+                if (kill(old_pid, 0) != 0) {
+                    log_info("Cleaning stale PID file (PID %d not found)", old_pid);
+                    clear_pid();
+                }
+            } else {
+                log_info("Invalid PID file content, cleaning up");
+                clear_pid();
+            }
+            fclose(f);
+        }
+    }
+}
+
 static int start_service(void) {
     if (is_running()) {
         log_info("%s is already running.", SERVICE_NAME);
@@ -522,58 +636,61 @@ static int start_service(void) {
     rotate_log(LOG_FILE);
     rotate_log(ERROR_LOG);
 
-    pid_t child_pid = fork();
-    if (child_pid < 0) {
-        log_error("Failed to fork background process: %s", strerror(errno));
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), 
+        "nohup busybox setuidgid %s %s run -D %s < /dev/null >> %s 2>&1 &",
+        RUN_USER, BIN_PATH, WORK_DIR, SINGBOX_LOG);
+    
+    int ret = system(cmd);
+    if (ret == -1) {
+        log_error("Failed to execute start command");
+        return 1;
+    }
+    if (WIFEXITED(ret) && WEXITSTATUS(ret) != 0) {
+        log_error("Start command failed with exit code %d", WEXITSTATUS(ret));
         return 1;
     }
 
-    if (child_pid == 0) {
-        // Child process
-        setsid();
+    int max_attempts = START_TIMEOUT * 2;
+    int attempts = 0;
+    pid_t running_pid = -1;
 
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            close(devnull);
+    while (attempts < max_attempts) {
+        sleep(1);
+        attempts++;
+        running_pid = get_pid();
+        if (running_pid > 0) {
+            break;
         }
-
-        int logfd = open(SINGBOX_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, STDOUT_FILENO);
-            dup2(logfd, STDERR_FILENO);
-            close(logfd);
+        if (attempts % 2 == 0) {
+            log_info("Waiting for process to start... (%d/%d)", attempts, max_attempts);
         }
-
-        execlp("busybox", "busybox", "setuidgid", RUN_USER, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-        // Fallback if busybox setuidgid fails or busybox not in PATH
-        execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-        exit(1);
     }
 
-    // Parent process
+    if (running_pid <= 0) {
+        log_error("%s failed to start!", SERVICE_NAME);
+        log_error("Check %s for details", SINGBOX_LOG);
+        char tail_cmd[256];
+        snprintf(tail_cmd, sizeof(tail_cmd), "tail -n 10 %s 2>/dev/null", SINGBOX_LOG);
+        system(tail_cmd);
+        clear_pid();
+        return 1;
+    }
+
     FILE *pf = fopen(PID_FILE, "w");
     if (pf) {
-        fprintf(pf, "%d\n", child_pid);
+        fprintf(pf, "%d\n", running_pid);
         fclose(pf);
     }
 
-    for (int i = 0; i < START_TIMEOUT; i++) {
-        sleep(1);
-        if (!is_running()) {
-            log_error("%s exited immediately after startup!", SERVICE_NAME);
-            log_error("Check %s for details", SINGBOX_LOG);
-            clear_pid();
-            return 1;
-        }
-    }
-
-    log_info("%s started successfully!", SERVICE_NAME);
+    log_info("%s started successfully (PID: %d)", SERVICE_NAME, running_pid);
     display_status();
     return 0;
 }
 
 static int stop_service(void) {
+    check_stale_pid();
+
     pid_t pid = get_pid();
     if (pid <= 0) {
         log_info("%s is not running.", SERVICE_NAME);
@@ -611,40 +728,44 @@ static int stop_service(void) {
 static int restart_service(void) {
     log_info("Restarting %s...", SERVICE_NAME);
 
-    pid_t pid = get_pid();
+    check_stale_pid();
 
-    if (access(PID_FILE, F_OK) == 0) {
-        FILE *f = fopen(PID_FILE, "r");
-        if (f) {
-            pid_t old_pid = -1;
-            if (fscanf(f, "%d", &old_pid) == 1 && old_pid > 0) {
-                if (kill(old_pid, 0) != 0) {
-                    log_info("Cleaning stale PID file (PID %d not found)", old_pid);
-                    clear_pid();
-                }
+    pid_t bin_pid = get_pid();
+    
+    if (bin_pid > 0 && kill(bin_pid, 0) == 0) {
+        log_info("Stopping existing process (PID: %d)...", bin_pid);
+        kill(bin_pid, SIGTERM);
+        
+        int waited = 0;
+        while (waited < STOP_TIMEOUT) {
+            if (kill(bin_pid, 0) != 0) break;
+            sleep(1);
+            waited++;
+        }
+        
+        if (kill(bin_pid, 0) == 0) {
+            log_info("Process unresponsive, force killing...");
+            kill(bin_pid, SIGKILL);
+            sleep(1);
+            
+            if (kill(bin_pid, 0) == 0) {
+                log_error("Failed to terminate process %d", bin_pid);
+                return 1;
             }
-            fclose(f);
         }
-    }
-
-    if (pid > 0 && kill(pid, 0) == 0) {
-        log_info("Stopping existing process (PID: %d)...", pid);
-        kill(pid, SIGTERM);
-        for (int i = 0; i < STOP_TIMEOUT; i++) {
-            if (kill(pid, 0) != 0) break;
-            sleep(1);
-        }
-        if (kill(pid, 0) == 0) {
-            log_info("Force killing...");
-            kill(pid, SIGKILL);
-            sleep(1);
-        }
+        
+        clear_pid();
+        log_info("Process stopped successfully");
+    } else if (bin_pid > 0) {
+        log_info("Cleaning stale PID (PID %d not found)", bin_pid);
         clear_pid();
     }
 
-    rmdir(LOCK_DIR);
+    clear_pid();
+    
     sync();
-    sleep(1);
+    usleep(500000);
+    
     return start_service();
 }
 
@@ -681,8 +802,9 @@ static void usage(const char *prog_name) {
     printf("  version  - Show sing-box version\n");
 }
 
-// ================= Entry Point =================
 int main(int argc, char *argv[]) {
+    load_config();
+
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "help") == 0)) {
         usage(argv[0]);
         return 0;

@@ -1,0 +1,18 @@
+# Build artifacts
+box
+box-*
+*.o
+*.a
+*.so
+.box.lock
+*.pid
+
+# Logs
+logs/
+*.log
+*.log.*
+*.1
+
+# Backup files
+*.bak
+*~
