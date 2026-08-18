@@ -26,10 +26,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
+      - name: Install Zig
+        run: |
+          ZIG_VER="0.13.0"
+          curl -sSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | tar -xJ -C /tmp
+          echo "/tmp/zig-linux-x86_64-${ZIG_VER}" >> $GITHUB_PATH
 
       - name: Build static binary (${{ matrix.arch }})
         run: |
@@ -67,9 +68,15 @@ jobs:
           ls -la
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          if [ "$TAG_NAME" = "$GITHUB_REF" ]; then
+            TAG_NAME="nightly"
+          fi
+          gh release create "$TAG_NAME" release-assets/* \
+            --title "Release ${TAG_NAME}" \
+            --generate-notes \
+            --notes-start-tag "" \
+            || gh release upload "$TAG_NAME" release-assets/* --clobber
