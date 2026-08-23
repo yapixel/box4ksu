@@ -3,8 +3,8 @@ CC = zig cc
 endif
 CC ?= zig cc
 TARGET_TRIPLE ?= aarch64-linux-musl
-CFLAGS ?= -Wall -Wextra -O2
-LDFLAGS ?= -static -Wl,-s
+CFLAGS ?= -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident
+LDFLAGS ?= -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none
 TARGET = box
 SRC = box.c
 PREFIX ?= /data/adb/sing-box

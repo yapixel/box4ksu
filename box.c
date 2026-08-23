@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,8 +16,6 @@
 #include <sys/wait.h>
 #include <sys/sysinfo.h>
 #include <ctype.h>
-#include <grp.h>
-#include <pwd.h>
 
 typedef struct {
     char service_name[128];
@@ -65,6 +64,101 @@ static int start_service(void);
 static int stop_service(void);
 static int restart_service(void);
 static int reload_service(void);
+
+static void get_self_dir(char *dir_buf, size_t size) {
+    char exe_path[512];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        char *slash = strrchr(exe_path, '/');
+        if (slash) {
+            *slash = '\0';
+            snprintf(dir_buf, size, "%s", exe_path);
+            return;
+        }
+    }
+    snprintf(dir_buf, size, ".");
+}
+
+static int get_real_path(const char *path, char *resolved, size_t size) {
+    char *res = realpath(path, resolved);
+    if (res != NULL) {
+        return 0;
+    }
+    snprintf(resolved, size, "%s", path);
+    return -1;
+}
+
+static uid_t resolve_uid(const char *name) {
+    if (!name || name[0] == '\0') return 0;
+    if (isdigit((unsigned char)name[0])) {
+        return (uid_t)atoi(name);
+    }
+    if (strcmp(name, "root") == 0) return 0;
+    if (strcmp(name, "system") == 0) return 1000;
+    if (strcmp(name, "shell") == 0) return 2000;
+    if (strcmp(name, "nobody") == 0) return 9999;
+    return 0;
+}
+
+static gid_t resolve_gid(const char *name) {
+    if (!name || name[0] == '\0') return 0;
+    if (isdigit((unsigned char)name[0])) {
+        return (gid_t)atoi(name);
+    }
+    if (strcmp(name, "root") == 0) return 0;
+    if (strcmp(name, "system") == 0) return 1000;
+    if (strcmp(name, "shell") == 0) return 2000;
+    if (strcmp(name, "inet") == 0) return 3003;
+    if (strcmp(name, "net_raw") == 0) return 3004;
+    if (strcmp(name, "net_admin") == 0) return 3005;
+    if (strcmp(name, "net_bw_stats") == 0) return 3006;
+    if (strcmp(name, "net_bw_acct") == 0) return 3007;
+    if (strcmp(name, "everybody") == 0) return 9997;
+    if (strcmp(name, "nobody") == 0) return 9999;
+    return 0;
+}
+
+static int apply_credentials(const char *user_spec) {
+    if (!user_spec || user_spec[0] == '\0') return 0;
+    if (strcmp(user_spec, "root") == 0 || strcmp(user_spec, "root:root") == 0 || strcmp(user_spec, "0:0") == 0) {
+        return 0;
+    }
+
+    char spec_copy[128];
+    snprintf(spec_copy, sizeof(spec_copy), "%s", user_spec);
+
+    char *colon = strchr(spec_copy, ':');
+    char *user_part = spec_copy;
+    char *group_part = NULL;
+
+    if (colon) {
+        *colon = '\0';
+        group_part = colon + 1;
+    }
+
+    uid_t target_uid = resolve_uid(user_part);
+    gid_t target_gid = (group_part && group_part[0] != '\0') ? resolve_gid(group_part) : (gid_t)target_uid;
+
+    gid_t groups[8];
+    int group_count = 0;
+    groups[group_count++] = target_gid;
+
+    if (target_gid == 3005) { // AID_NET_ADMIN
+        groups[group_count++] = 3003; // AID_INET
+        groups[group_count++] = 3004; // AID_NET_RAW
+    }
+
+    setgroups(group_count, groups);
+    if (setresgid(target_gid, target_gid, target_gid) != 0) {
+        setgid(target_gid);
+    }
+    if (setresuid(target_uid, target_uid, target_uid) != 0) {
+        setuid(target_uid);
+    }
+
+    return 0;
+}
 
 static char *trim_str(char *str) {
     while (isspace((unsigned char)*str)) str++;
@@ -158,13 +252,17 @@ static void load_config(void) {
 
     int has_bin = 0, has_pid = 0, has_logdir = 0, has_logfile = 0, has_errlog = 0, has_sblog = 0, has_lockdir = 0, has_workdir = 0;
 
+    char self_dir[512];
+    get_self_dir(self_dir, sizeof(self_dir));
+
+    char self_ini[512];
+    snprintf(self_ini, sizeof(self_ini), "%s/box.ini", self_dir);
+
     const char *candidates[] = {
         "box.ini",
-        "bix.ini",
+        self_ini,
         "/data/adb/sing-box/box.ini",
-        "/data/adb/sing-box/bix.ini",
         "/data/adb/box.ini",
-        "/data/adb/bix.ini",
         NULL
     };
 
@@ -180,7 +278,13 @@ static void load_config(void) {
         }
     }
 
-    if (!has_workdir) snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%s", g_cfg.service_name);
+    if (!has_workdir) {
+        if (self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", self_dir);
+        } else {
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%s", g_cfg.service_name);
+        }
+    }
     if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s/bin/%s", g_cfg.work_dir, g_cfg.service_name);
     if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s/%s.pid", g_cfg.work_dir, g_cfg.service_name);
     if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s/logs", g_cfg.work_dir);
@@ -360,12 +464,24 @@ static void acquire_lock(void) {
     }
     g_lock_acquired = 1;
     atexit(release_lock);
-    signal(SIGINT, signal_lock_cleanup);
-    signal(SIGTERM, signal_lock_cleanup);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_lock_cleanup;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
 }
 
 static pid_t check_proc_pid(pid_t p) {
     if (p <= 0 || kill(p, 0) != 0) return -1;
+
+    char expected_bin[512];
+    get_real_path(BIN_PATH, expected_bin, sizeof(expected_bin));
 
     char exe_path[256];
     char link_target[512];
@@ -373,24 +489,40 @@ static pid_t check_proc_pid(pid_t p) {
     ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
     if (len > 0) {
         link_target[len] = '\0';
-        if (strstr(link_target, SERVICE_NAME) != NULL) {
+        if (strcmp(link_target, expected_bin) == 0 || strcmp(link_target, BIN_PATH) == 0) {
             return p;
         }
-    } else {
-        char comm_path[256];
-        snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
-        FILE *fcomm = fopen(comm_path, "r");
-        if (fcomm) {
-            char comm_buf[64] = {0};
-            if (fgets(comm_buf, sizeof(comm_buf), fcomm)) {
-                comm_buf[strcspn(comm_buf, "\r\n")] = 0;
-                if (strcmp(comm_buf, SERVICE_NAME) == 0) {
-                    fclose(fcomm);
-                    return p;
-                }
+    }
+
+    char cmdline_path[256];
+    snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", p);
+    FILE *fcmd = fopen(cmdline_path, "r");
+    if (fcmd) {
+        char cmd_buf[1024] = {0};
+        size_t n = fread(cmd_buf, 1, sizeof(cmd_buf) - 1, fcmd);
+        fclose(fcmd);
+        if (n > 0) {
+            int match_bin = (strstr(cmd_buf, SERVICE_NAME) != NULL);
+            int match_dir = (WORK_DIR[0] != '\0' && memmem(cmd_buf, n, WORK_DIR, strlen(WORK_DIR)) != NULL);
+            if (match_bin && match_dir) {
+                return p;
             }
-            fclose(fcomm);
         }
+    }
+
+    char comm_path[256];
+    snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
+    FILE *fcomm = fopen(comm_path, "r");
+    if (fcomm) {
+        char comm_buf[64] = {0};
+        if (fgets(comm_buf, sizeof(comm_buf), fcomm)) {
+            comm_buf[strcspn(comm_buf, "\r\n")] = 0;
+            if (strcmp(comm_buf, SERVICE_NAME) == 0 && len <= 0) {
+                fclose(fcomm);
+                return p;
+            }
+        }
+        fclose(fcomm);
     }
     return -1;
 }
@@ -581,9 +713,7 @@ static int display_status(void) {
             }
         }
         closedir(dir);
-        if (socket_count > 0) {
-            log_info("Network sockets: %d", socket_count);
-        }
+        log_info("Network sockets: %d", socket_count);
     }
 
     char io_path[256];
@@ -601,9 +731,18 @@ static int display_status(void) {
         }
         fclose(io_f);
         if (read_bytes >= 0 && write_bytes >= 0) {
-            double read_mb = (double)read_bytes / 1048576.0;
-            double write_mb = (double)write_bytes / 1048576.0;
-            log_info("Disk I/O: read %.2f MB / write %.2f MB", read_mb, write_mb);
+            char r_str[32], w_str[32];
+            if (read_bytes >= 1073741824LL) {
+                snprintf(r_str, sizeof(r_str), "%.2f GB", (double)read_bytes / 1073741824.0);
+            } else {
+                snprintf(r_str, sizeof(r_str), "%.2f MB", (double)read_bytes / 1048576.0);
+            }
+            if (write_bytes >= 1073741824LL) {
+                snprintf(w_str, sizeof(w_str), "%.2f GB", (double)write_bytes / 1073741824.0);
+            } else {
+                snprintf(w_str, sizeof(w_str), "%.2f MB", (double)write_bytes / 1048576.0);
+            }
+            log_info("Disk I/O: read %s / write %s", r_str, w_str);
         }
     }
 
@@ -746,13 +885,8 @@ static int start_service(void) {
             if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
         }
 
-        if (RUN_USER[0] != '\0' && strcmp(RUN_USER, "root") != 0 && strcmp(RUN_USER, "root:root") != 0) {
-            execlp("busybox", "busybox", "setuidgid", RUN_USER, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-            execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-        } else {
-            execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-        }
-
+        apply_credentials(RUN_USER);
+        execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
         _exit(127);
     }
 
