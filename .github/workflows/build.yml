@@ -34,7 +34,7 @@ jobs:
 
       - name: Build static binary (${{ matrix.arch }})
         run: |
-          zig cc -Wall -Wextra -O2 -target ${{ matrix.target }} -static -Wl,-s -o box-${{ matrix.arch }} box.c
+          zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box-${{ matrix.arch }} box.c
           file box-${{ matrix.arch }}
           ls -lh box-${{ matrix.arch }}
 

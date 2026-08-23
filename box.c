@@ -450,7 +450,7 @@ static void acquire_lock(void) {
         struct stat st;
         if (stat(LOCK_DIR, &st) == 0) {
             time_t now = time(NULL);
-            if (difftime(now, st.st_mtime) > 60.0) {
+            if ((now - st.st_mtime) > 60) {
                 rmdir(LOCK_DIR);
                 continue;
             }
@@ -549,15 +549,15 @@ static pid_t scan_proc_for_service(void) {
 static pid_t get_pid(void) {
     FILE *f = fopen(PID_FILE, "r");
     if (f) {
-        pid_t p = -1;
-        if (fscanf(f, "%d", &p) == 1 && p > 0) {
-            fclose(f);
-            if (check_proc_pid(p) > 0) {
+        char pbuf[64];
+        if (fgets(pbuf, sizeof(pbuf), f)) {
+            pid_t p = (pid_t)atoi(pbuf);
+            if (p > 0 && check_proc_pid(p) > 0) {
+                fclose(f);
                 return p;
             }
-        } else {
-            fclose(f);
         }
+        fclose(f);
     }
 
     pid_t discovered_pid = scan_proc_for_service();
@@ -583,9 +583,13 @@ static void clear_pid(void) {
 
 static void fmt_mem(long long kb, char *buf, size_t size) {
     if (kb >= 1048576LL) {
-        snprintf(buf, size, "%.2f GB", (double)kb / 1048576.0);
+        long long whole = kb / 1048576LL;
+        long long frac = ((kb % 1048576LL) * 100LL) / 1048576LL;
+        snprintf(buf, size, "%lld.%02lld GB", whole, frac);
     } else if (kb >= 1024LL) {
-        snprintf(buf, size, "%.2f MB", (double)kb / 1024.0);
+        long long whole = kb / 1024LL;
+        long long frac = ((kb % 1024LL) * 100LL) / 1024LL;
+        snprintf(buf, size, "%lld.%02lld MB", whole, frac);
     } else {
         snprintf(buf, size, "%lld kB", kb);
     }
@@ -622,7 +626,9 @@ static int display_status(void) {
         long long mem_kb = -1;
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "VmRSS:", 6) == 0) {
-                sscanf(line + 6, "%lld", &mem_kb);
+                char *p = line + 6;
+                while (*p == ' ' || *p == '\t') p++;
+                mem_kb = strtoll(p, NULL, 10);
                 break;
             }
         }
@@ -635,14 +641,14 @@ static int display_status(void) {
     }
 
     // 2. Uptime & CPU usage calculated directly from /proc/<pid>/stat and clock_gettime
+    long long sys_uptime_sec = 0;
     struct timespec bts;
-    double sys_uptime = 0.0;
     if (clock_gettime(CLOCK_BOOTTIME, &bts) == 0) {
-        sys_uptime = (double)bts.tv_sec + ((double)bts.tv_nsec / 1e9);
+        sys_uptime_sec = (long long)bts.tv_sec;
     } else {
         struct sysinfo si;
         if (sysinfo(&si) == 0) {
-            sys_uptime = (double)si.uptime;
+            sys_uptime_sec = (long long)si.uptime;
         }
     }
 
@@ -673,14 +679,19 @@ static int display_status(void) {
                 long clk_tck = sysconf(_SC_CLK_TCK);
                 if (clk_tck <= 0) clk_tck = 100;
 
-                double starttime_sec = (double)starttime / clk_tck;
-                double total_sec = (sys_uptime > 0.0) ? (sys_uptime - starttime_sec) : 0.0;
-                if (total_sec < 0.0) total_sec = 0.0;
+                unsigned long long starttime_sec = starttime / (unsigned long long)clk_tck;
+                long long total_sec = (sys_uptime_sec > 0) ? (sys_uptime_sec - (long long)starttime_sec) : 0;
+                if (total_sec < 0) total_sec = 0;
 
-                if (total_sec > 0.0) {
-                    double cpu_sec = (double)(utime + stime) / clk_tck;
-                    double cpu_pct = (cpu_sec / total_sec) * 100.0;
-                    log_info("CPU usage: %.1f%%", cpu_pct);
+                if (total_sec > 0) {
+                    unsigned long long cpu_ticks = utime + stime;
+                    unsigned long long total_ticks = (unsigned long long)total_sec * (unsigned long long)clk_tck;
+                    if (total_ticks > 0) {
+                        unsigned long long cpu_tenths = (cpu_ticks * 1000ULL) / total_ticks;
+                        log_info("CPU usage: %llu.%llu%%", cpu_tenths / 10ULL, cpu_tenths % 10ULL);
+                    } else {
+                        log_info("CPU usage: 0.0%%");
+                    }
                 } else {
                     log_info("CPU usage: 0.0%%");
                 }
@@ -724,23 +735,35 @@ static int display_status(void) {
         long long read_bytes = -1, write_bytes = -1;
         while (fgets(line, sizeof(line), io_f)) {
             if (strncmp(line, "read_bytes:", 11) == 0) {
-                sscanf(line + 11, "%lld", &read_bytes);
+                char *p = line + 11;
+                while (*p == ' ' || *p == '\t') p++;
+                read_bytes = strtoll(p, NULL, 10);
             } else if (strncmp(line, "write_bytes:", 12) == 0) {
-                sscanf(line + 12, "%lld", &write_bytes);
+                char *p = line + 12;
+                while (*p == ' ' || *p == '\t') p++;
+                write_bytes = strtoll(p, NULL, 10);
             }
         }
         fclose(io_f);
         if (read_bytes >= 0 && write_bytes >= 0) {
             char r_str[32], w_str[32];
             if (read_bytes >= 1073741824LL) {
-                snprintf(r_str, sizeof(r_str), "%.2f GB", (double)read_bytes / 1073741824.0);
+                long long whole = read_bytes / 1073741824LL;
+                long long frac = ((read_bytes % 1073741824LL) * 100LL) / 1073741824LL;
+                snprintf(r_str, sizeof(r_str), "%lld.%02lld GB", whole, frac);
             } else {
-                snprintf(r_str, sizeof(r_str), "%.2f MB", (double)read_bytes / 1048576.0);
+                long long whole = read_bytes / 1048576LL;
+                long long frac = ((read_bytes % 1048576LL) * 100LL) / 1048576LL;
+                snprintf(r_str, sizeof(r_str), "%lld.%02lld MB", whole, frac);
             }
             if (write_bytes >= 1073741824LL) {
-                snprintf(w_str, sizeof(w_str), "%.2f GB", (double)write_bytes / 1073741824.0);
+                long long whole = write_bytes / 1073741824LL;
+                long long frac = ((write_bytes % 1073741824LL) * 100LL) / 1073741824LL;
+                snprintf(w_str, sizeof(w_str), "%lld.%02lld GB", whole, frac);
             } else {
-                snprintf(w_str, sizeof(w_str), "%.2f MB", (double)write_bytes / 1048576.0);
+                long long whole = write_bytes / 1048576LL;
+                long long frac = ((write_bytes % 1048576LL) * 100LL) / 1048576LL;
+                snprintf(w_str, sizeof(w_str), "%lld.%02lld MB", whole, frac);
             }
             log_info("Disk I/O: read %s / write %s", r_str, w_str);
         }
@@ -805,9 +828,10 @@ static void check_stale_pid(void) {
     if (access(PID_FILE, F_OK) == 0) {
         FILE *f = fopen(PID_FILE, "r");
         if (f) {
-            pid_t old_pid = -1;
-            if (fscanf(f, "%d", &old_pid) == 1 && old_pid > 0) {
-                if (kill(old_pid, 0) != 0) {
+            char pbuf[64];
+            if (fgets(pbuf, sizeof(pbuf), f)) {
+                pid_t old_pid = (pid_t)atoi(pbuf);
+                if (old_pid > 0 && kill(old_pid, 0) != 0) {
                     log_info("Cleaning stale PID file (PID %d not found)", old_pid);
                     clear_pid();
                 }
