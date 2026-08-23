@@ -169,6 +169,53 @@ static char *trim_str(char *str) {
     return str;
 }
 
+static void expand_vars(char *dst, size_t dst_size, const char *src) {
+    char temp[512];
+    size_t di = 0;
+    size_t si = 0;
+    size_t len = strlen(src);
+    while (si < len && di < sizeof(temp) - 1) {
+        if (src[si] == '$') {
+            if (strncmp(src + si, "${SERVICE_NAME}", 15) == 0) {
+                size_t vlen = strlen(g_cfg.service_name);
+                if (di + vlen < sizeof(temp) - 1) {
+                    memcpy(temp + di, g_cfg.service_name, vlen);
+                    di += vlen;
+                    si += 15;
+                    continue;
+                }
+            } else if (strncmp(src + si, "$SERVICE_NAME", 13) == 0) {
+                size_t vlen = strlen(g_cfg.service_name);
+                if (di + vlen < sizeof(temp) - 1) {
+                    memcpy(temp + di, g_cfg.service_name, vlen);
+                    di += vlen;
+                    si += 13;
+                    continue;
+                }
+            } else if (strncmp(src + si, "${WORK_DIR}", 11) == 0) {
+                size_t vlen = strlen(g_cfg.work_dir);
+                if (di + vlen < sizeof(temp) - 1) {
+                    memcpy(temp + di, g_cfg.work_dir, vlen);
+                    di += vlen;
+                    si += 11;
+                    continue;
+                }
+            } else if (strncmp(src + si, "$WORK_DIR", 9) == 0) {
+                size_t vlen = strlen(g_cfg.work_dir);
+                if (di + vlen < sizeof(temp) - 1) {
+                    memcpy(temp + di, g_cfg.work_dir, vlen);
+                    di += vlen;
+                    si += 9;
+                    continue;
+                }
+            }
+        }
+        temp[di++] = src[si++];
+    }
+    temp[di] = '\0';
+    snprintf(dst, dst_size, "%s", temp);
+}
+
 static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir, int *has_workdir) {
     line = trim_str(line);
     if (line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return;
@@ -199,44 +246,47 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
         }
     }
 
+    char exp_val[512];
+    expand_vars(exp_val, sizeof(exp_val), val);
+
     if (strcasecmp(key, "service_name") == 0) {
-        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%s", val);
+        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%s", exp_val);
     } else if (strcasecmp(key, "work_dir") == 0) {
-        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", val);
+        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", exp_val);
         *has_workdir = 1;
     } else if (strcasecmp(key, "bin_path") == 0) {
-        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s", val);
+        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s", exp_val);
         *has_bin = 1;
     } else if (strcasecmp(key, "pid_file") == 0) {
-        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s", val);
+        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s", exp_val);
         *has_pid = 1;
     } else if (strcasecmp(key, "log_dir") == 0) {
-        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s", val);
+        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s", exp_val);
         *has_logdir = 1;
     } else if (strcasecmp(key, "log_file") == 0) {
-        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s", val);
+        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s", exp_val);
         *has_logfile = 1;
     } else if (strcasecmp(key, "error_log") == 0) {
-        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s", val);
+        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s", exp_val);
         *has_errlog = 1;
     } else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) {
-        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s", val);
+        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s", exp_val);
         *has_sblog = 1;
     } else if (strcasecmp(key, "lock_dir") == 0) {
-        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s", val);
+        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s", exp_val);
         *has_lockdir = 1;
     } else if (strcasecmp(key, "run_user") == 0) {
-        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", val);
+        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", exp_val);
     } else if (strcasecmp(key, "max_log_size") == 0) {
-        g_cfg.max_log_size = atol(val);
+        g_cfg.max_log_size = atol(exp_val);
     } else if (strcasecmp(key, "stop_timeout") == 0) {
-        g_cfg.stop_timeout = atoi(val);
+        g_cfg.stop_timeout = atoi(exp_val);
     } else if (strcasecmp(key, "start_timeout") == 0) {
-        g_cfg.start_timeout = atoi(val);
+        g_cfg.start_timeout = atoi(exp_val);
     } else if (strcasecmp(key, "check_config") == 0) {
-        g_cfg.check_config = atoi(val);
+        g_cfg.check_config = atoi(exp_val);
     } else if (strcasecmp(key, "nofile_limit") == 0) {
-        g_cfg.nofile_limit = atol(val);
+        g_cfg.nofile_limit = atol(exp_val);
     }
 }
 
@@ -321,7 +371,11 @@ static void log_info(const char *fmt, ...) {
     vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
 
-    printf("[%s] [INFO] %s\n", timestamp, message);
+    if (isatty(STDOUT_FILENO)) {
+        printf("[%s] \033[32m[INFO]\033[0m %s\n", timestamp, message);
+    } else {
+        printf("[%s] [INFO] %s\n", timestamp, message);
+    }
     fflush(stdout);
 
     FILE *f = fopen(LOG_FILE, "a");
@@ -342,7 +396,11 @@ static void log_error(const char *fmt, ...) {
     vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
 
-    fprintf(stderr, "[%s] [ERROR] %s\n", timestamp, message);
+    if (isatty(STDERR_FILENO)) {
+        fprintf(stderr, "[%s] \033[31m[ERROR]\033[0m %s\n", timestamp, message);
+    } else {
+        fprintf(stderr, "[%s] [ERROR] %s\n", timestamp, message);
+    }
     fflush(stderr);
 
     FILE *f = fopen(ERROR_LOG, "a");
@@ -432,11 +490,55 @@ static void prepare_env(void) {
     }
 }
 
+static void remove_lock_dir(void) {
+    char pid_path[600];
+    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
+    unlink(pid_path);
+    rmdir(LOCK_DIR);
+}
+
 static void release_lock(void) {
     if (g_lock_acquired) {
-        rmdir(LOCK_DIR);
+        remove_lock_dir();
         g_lock_acquired = 0;
     }
+}
+
+static void write_lock_pid(void) {
+    char pid_path[600];
+    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
+    FILE *f = fopen(pid_path, "w");
+    if (f) {
+        fprintf(f, "%d\n", getpid());
+        fclose(f);
+    }
+}
+
+static int is_lock_stale(void) {
+    char pid_path[600];
+    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
+    FILE *f = fopen(pid_path, "r");
+    if (f) {
+        char pbuf[32];
+        if (fgets(pbuf, sizeof(pbuf), f)) {
+            pid_t lock_pid = (pid_t)atoi(pbuf);
+            fclose(f);
+            if (lock_pid > 0 && lock_pid != getpid()) {
+                if (kill(lock_pid, 0) != 0 && errno == ESRCH) {
+                    return 1;
+                }
+                return 0;
+            }
+        } else {
+            fclose(f);
+        }
+    }
+    struct stat st;
+    if (stat(LOCK_DIR, &st) == 0) {
+        time_t now = time(NULL);
+        if ((now - st.st_mtime) > 60) return 1;
+    }
+    return 0;
 }
 
 static void signal_lock_cleanup(int sig) {
@@ -447,13 +549,9 @@ static void signal_lock_cleanup(int sig) {
 static void acquire_lock(void) {
     int attempts = 0;
     while (mkdir(LOCK_DIR, 0755) != 0) {
-        struct stat st;
-        if (stat(LOCK_DIR, &st) == 0) {
-            time_t now = time(NULL);
-            if ((now - st.st_mtime) > 60) {
-                rmdir(LOCK_DIR);
-                continue;
-            }
+        if (is_lock_stale()) {
+            remove_lock_dir();
+            continue;
         }
         attempts++;
         if (attempts >= 10) {
@@ -462,6 +560,7 @@ static void acquire_lock(void) {
         }
         sleep(1);
     }
+    write_lock_pid();
     g_lock_acquired = 1;
     atexit(release_lock);
 
@@ -688,12 +787,12 @@ static int display_status(void) {
                     unsigned long long total_ticks = (unsigned long long)total_sec * (unsigned long long)clk_tck;
                     if (total_ticks > 0) {
                         unsigned long long cpu_tenths = (cpu_ticks * 1000ULL) / total_ticks;
-                        log_info("CPU usage: %llu.%llu%%", cpu_tenths / 10ULL, cpu_tenths % 10ULL);
+                        log_info("CPU usage: %llu.%llu%% (avg)", cpu_tenths / 10ULL, cpu_tenths % 10ULL);
                     } else {
-                        log_info("CPU usage: 0.0%%");
+                        log_info("CPU usage: 0.0%% (avg)");
                     }
                 } else {
-                    log_info("CPU usage: 0.0%%");
+                    log_info("CPU usage: 0.0%% (avg)");
                 }
 
                 char uptime_str[64];
@@ -998,6 +1097,14 @@ static int stop_service(void) {
 
 static int restart_service(void) {
     log_info("Restarting %s...", SERVICE_NAME);
+
+    if (CHECK_CONFIG == 1) {
+        log_info("Validating configuration before restart...");
+        if (do_check() != 0) {
+            log_error("Configuration validation failed, aborting restart to preserve running service");
+            return 1;
+        }
+    }
 
     pid_t pid = get_pid();
     if (pid > 0) {
