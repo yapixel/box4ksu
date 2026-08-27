@@ -1,0 +1,499 @@
+{
+  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "output": "sing-box.log",
+    "timestamp": true
+  },
+  "services": [
+    {
+      "type": "api",
+      "listen": "127.0.0.1",
+      "listen_port": 9080,
+      "secret": "",
+      "access_control_allow_origin": [
+        "http://127.0.0.1",
+        "https://dashboard.zend.eu.org",
+        "https://zash.zend.eu.org"
+      ],
+      "access_control_allow_private_network": true,
+      "dashboard": {
+        "enabled": true,
+        "path": "/dist",
+        "download_url": "",
+        "http_client": "detour_proxy",
+        "update_interval": "24h"
+      }
+    }
+  ],
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db",
+      "store_fakeip": false
+    },
+    "clash_api": {
+      "default_mode": "Rule",
+      "external_controller": "127.0.0.1:9090",
+      "external_ui": "zashboard",
+      "external_ui_download_url": "https://github.com/ruaue/zashboard/releases/download/v3.21.0/dist-no-fonts.zip",
+      "access_control_allow_origin": [
+        "http://127.0.0.1",
+        "https://zash.zend.eu.org"
+      ],
+      "access_control_allow_private_network": true,
+      "external_ui_download_detour": "Proxy"
+    }
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-proxy",
+        "type": "tls",
+        "server": "1.1.1.1",
+        "detour": "Proxy"
+      },
+      {
+        "tag": "dns-direct",
+        "type": "https",
+        "server": "dns.alidns.com",
+        "domain_resolver": "dns-hosts"
+      },
+      {
+        "tag": "dns-hosts",
+        "type": "hosts",
+        "predefined": {
+          "dns.alidns.com": [
+            "223.5.5.5",
+            "223.6.6.6"
+          ],
+          "doh.pub": [
+            "120.53.53.53",
+            "1.12.12.12"
+          ]
+        }
+      }
+    ],
+    "rules": [
+      {
+        "query_type": [
+          64,
+          65
+        ],
+        "action": "reject"
+      },
+      {
+        "clash_mode": "Direct",
+        "action": "route",
+        "server": "dns-direct"
+      },
+      {
+        "clash_mode": "Global",
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "clash_mode": "AllowAds",
+            "invert": true
+          },
+          {
+            "rule_set": [
+              "AWAvenue-Ads",
+              "geosite/category-ads-all",
+              "geosite/adblockplus",
+              "geosite/category-httpdns-cn",
+              "geosite/adguard"
+            ]
+          }
+        ],
+        "action": "reject"
+      },
+      {
+        "rule_set": [
+          "geosite/alibaba",
+          "geosite/category-games@cn",
+          "geosite/apple-cn",
+          "geosite/private",
+          "geosite/cn"
+        ],
+        "action": "route",
+        "server": "dns-direct"
+      },
+      {
+        "rule_set": [
+          "geosite/geolocation-!cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      }
+    ],
+    "final": "dns-proxy",
+    "independent_cache": false,
+    "reverse_mapping": true,
+    "optimistic": true,
+    "strategy": "prefer_ipv4"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "mtu": 1500,
+      "stack": "system",
+      "auto_route": true,
+      "strict_route": true,
+      "endpoint_independent_nat": true
+    }
+  ],
+  "http_clients": [
+    {
+      "tag": "detour_proxy",
+      "detour": "Proxy"
+    },
+    {
+      "tag": "detour_direct",
+      "detour": "direct"
+    }
+  ],
+  "outbound_providers": [
+    {
+      "tag": "vk",
+      "type": "remote",
+      "url": "vk_url",
+      "update_interval": "2h",
+      "http_client": "detour_proxy",
+      "path": "providers/vk.json"
+    },
+    {
+      "tag": "ruaue",
+      "type": "local",
+      "path": "providers/ruaue.json"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "bridge-out",
+      "type": "bridge"
+    },
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "HOME-SS",
+      "server": "nw.rs4.us",
+      "server_port": 8892,
+      "method": "rc4-md5",
+      "password": "goawaygfw"
+    },
+    {
+      "tag": "Proxy",
+      "type": "selector",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "exclude": "E1|N1|E2",
+      "include": "HK|香港|AZ|JP|日本|SG|新加坡|TW|台湾|US|美国",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "Netflix",
+      "outbounds": [
+        "Hong Kong",
+        "Singapore",
+        "Japan",
+        "US"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Youtube",
+      "outbounds": [
+        "Hong Kong",
+        "Singapore",
+        "Taiwan",
+        "Japan",
+        "US"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Telegram",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "exclude": "HK|香港",
+      "include": "JP|日本|SG|新加坡|TW|台湾|US|美国",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "US",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "include": "US|美国",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "AI",
+      "outbounds": [
+        "Singapore",
+        "Taiwan",
+        "Japan",
+        "US"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Hong Kong",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "include": "HK|香港",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "Taiwan",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "include": "TW|台湾",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "Japan",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "include": "JP|日本",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "Singapore",
+      "providers": [
+        "vk",
+        "ruaue"
+      ],
+      "use_all_providers": false,
+      "include": "SG|新加坡",
+      "interrupt_exist_connections": true
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "dns-direct",
+    "rule_set": [
+      {
+        "tag": "AWAvenue-Ads",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.srs",
+        "http_client": "detour_proxy",
+        "update_interval": "24h",
+        "path": "./rule_set/Ads_AWAvenue.srs"
+      },
+      {
+        "tag": [
+          "geosite/category-ads-all",
+          "geosite/adblockplus",
+          "geosite/category-httpdns-cn",
+          "geosite/adguard",
+          "geosite/alibaba",
+          "geosite/category-games@cn",
+          "geosite/apple-cn",
+          "geosite/private",
+          "geosite/google-cn",
+          "geosite/google",
+          "geosite/cn",
+          "geosite/geolocation-!cn",
+          "geosite/netflix",
+          "geosite/openai",
+          "geosite/anthropic",
+          "geosite/youtube",
+          "geosite/hulu",
+          "geoip/telegram",
+          "geoip/cn"
+        ],
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/{tag}.srs",
+        "http_client": "detour_proxy",
+        "update_interval": "24h",
+        "path": "./rule_set/{tag}.srs"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "port": 53
+          },
+          {
+            "protocol": "dns"
+          }
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "clash_mode": "Direct",
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "clash_mode": "Global",
+        "action": "route",
+        "outbound": "Proxy"
+      },
+      {
+        "ip_cidr": [
+          "192.168.88.0/24"
+        ],
+        "action": "route",
+        "outbound": "HOME-SS"
+      },
+      {
+        "process_name": [
+          "Weixin.exe",
+          "BaiduNetdiskUnite.exe"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "snauth.wps.cn"
+        ],
+        "action": "reject"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "clash_mode": "AllowAds",
+            "invert": true
+          },
+          {
+            "rule_set": [
+              "AWAvenue-Ads",
+              "geosite/category-ads-all",
+              "geosite/adblockplus",
+              "geosite/category-httpdns-cn",
+              "geosite/adguard"
+            ]
+          }
+        ],
+        "action": "reject"
+      },
+      {
+        "domain": [
+          "dl.google.com",
+          "www.gstatic.com"
+        ],
+        "domain_suffix": [
+          "googleapis.com",
+          "gstatic.com"
+        ],
+        "action": "route",
+        "outbound": "US"
+      },
+      {
+        "rule_set": [
+          "geosite/openai",
+          "geosite/anthropic"
+        ],
+        "action": "route",
+        "outbound": "AI"
+      },
+      {
+        "rule_set": "geosite/netflix",
+        "action": "route",
+        "outbound": "Netflix"
+      },
+      {
+        "rule_set": "geosite/youtube",
+        "action": "route",
+        "outbound": "Youtube"
+      },
+      {
+        "rule_set": [
+          "geosite/google",
+          "geosite/google-cn"
+        ],
+        "action": "route",
+        "outbound": "US"
+      },
+      {
+        "rule_set": [
+          "geosite/alibaba",
+          "geosite/category-games@cn",
+          "geosite/apple-cn",
+          "geosite/private",
+          "geosite/cn"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "geosite/geolocation-!cn"
+        ],
+        "action": "route",
+        "outbound": "Proxy"
+      },
+      {
+        "action": "resolve",
+        "match_only": true
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geoip/telegram",
+        "action": "route",
+        "outbound": "Telegram"
+      },
+      {
+        "rule_set": "geoip/cn",
+        "action": "route",
+        "outbound": "direct"
+      }
+    ],
+    "find_process": true,
+    "auto_detect_interface": true,
+    "final": "Proxy"
+  }
+}
