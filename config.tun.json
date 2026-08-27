@@ -521,5 +521,20 @@
     "find_process": true,
     "auto_detect_interface": true,
     "final": "Proxy"
-  }
+  },
+  "outbound_providers": [
+    {
+      "tag": "vk",
+      "type": "remote",
+      "url": "vk_url",
+      "update_interval": "2h",
+      "http_client": "detour_proxy",
+      "path": "providers/vk.json"
+    },
+    {
+      "tag": "ruaue",
+      "type": "local",
+      "path": "providers/ruaue.json"
+    }
+  ]
 }
