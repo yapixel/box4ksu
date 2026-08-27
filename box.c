@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -28,6 +29,7 @@ typedef struct {
     char singbox_log[512];
     char lock_dir[512];
     char run_user[128];
+    char timezone[128];
     long max_log_size;
     int stop_timeout;
     int start_timeout;
@@ -47,6 +49,7 @@ static Config g_cfg;
 #define SINGBOX_LOG     g_cfg.singbox_log
 #define LOCK_DIR        g_cfg.lock_dir
 #define RUN_USER        g_cfg.run_user
+#define TIMEZONE        g_cfg.timezone
 #define MAX_LOG_SIZE    g_cfg.max_log_size
 #define STOP_TIMEOUT    g_cfg.stop_timeout
 #define START_TIMEOUT   g_cfg.start_timeout
@@ -277,6 +280,8 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
         *has_lockdir = 1;
     } else if (strcasecmp(key, "run_user") == 0) {
         snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", exp_val);
+    } else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) {
+        snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%s", exp_val);
     } else if (strcasecmp(key, "max_log_size") == 0) {
         g_cfg.max_log_size = atol(exp_val);
     } else if (strcasecmp(key, "stop_timeout") == 0) {
@@ -290,10 +295,301 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
     }
 }
 
+static uint32_t read_be32(const unsigned char *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static int parse_tzif_footer(const unsigned char *data, size_t len, char *out_tz, size_t out_len) {
+    if (len < 10 || data[len - 1] != '\n') return -1;
+    long p = (long)len - 2;
+    while (p >= 0 && data[p] != '\n') {
+        p--;
+    }
+    if (p < 0) return -1;
+    size_t tz_str_len = (len - 1) - (p + 1);
+    if (tz_str_len == 0 || tz_str_len >= out_len) return -1;
+    memcpy(out_tz, data + p + 1, tz_str_len);
+    out_tz[tz_str_len] = '\0';
+    return 0;
+}
+
+static int parse_tzif_v1_fallback(const unsigned char *data, size_t len, time_t now, char *out_tz, size_t out_len) {
+    if (len < 44 || memcmp(data, "TZif", 4) != 0) return -1;
+    uint32_t timecnt = read_be32(data + 32);
+    uint32_t typecnt = read_be32(data + 36);
+    if (typecnt == 0) return -1;
+
+    size_t times_off = 44;
+    size_t types_off = times_off + timecnt * 4;
+    size_t ttinfo_off = types_off + timecnt;
+    if (ttinfo_off + typecnt * 6 > len) return -1;
+
+    int type_idx = 0;
+    if (timecnt > 0) {
+        int found = 0;
+        for (int i = (int)timecnt - 1; i >= 0; i--) {
+            int32_t t = (int32_t)read_be32(data + times_off + i * 4);
+            if ((int64_t)now >= (int64_t)t) {
+                type_idx = data[types_off + i];
+                found = 1;
+                break;
+            }
+        }
+        if (!found) type_idx = data[types_off];
+    }
+    if ((uint32_t)type_idx >= typecnt) type_idx = 0;
+
+    int32_t gmtoff = (int32_t)read_be32(data + ttinfo_off + type_idx * 6);
+    int total_mins = gmtoff / 60;
+    int hours = abs(total_mins / 60);
+    int mins = abs(total_mins % 60);
+    char sign = (gmtoff >= 0) ? '-' : '+';
+    if (mins != 0) {
+        snprintf(out_tz, out_len, "UTC%c%d:%02d", sign, hours, mins);
+    } else {
+        snprintf(out_tz, out_len, "UTC%c%d", sign, hours);
+    }
+    return 0;
+}
+
+static int get_posix_tz_from_android_tzdata(const char *tz_name, char *out_tz, size_t out_len) {
+    if (!tz_name || tz_name[0] == '\0') return -1;
+
+    const char *tzdata_paths[] = {
+        "/apex/com.android.tzdata/etc/tz/tzdata",
+        "/system/usr/share/zoneinfo/tzdata",
+        "/apex/com.android.runtime/etc/tz/tzdata",
+        "/data/misc/zoneinfo/tzdata",
+        NULL
+    };
+
+    for (int p = 0; tzdata_paths[p] != NULL; p++) {
+        FILE *f = fopen(tzdata_paths[p], "rb");
+        if (!f) continue;
+
+        unsigned char header[24];
+        if (fread(header, 1, 24, f) != 24 || memcmp(header, "tzdata", 6) != 0) {
+            fclose(f);
+            continue;
+        }
+
+        uint32_t idx_off = read_be32(header + 12);
+        uint32_t data_off = read_be32(header + 16);
+
+        if (fseek(f, idx_off, SEEK_SET) != 0) {
+            fclose(f);
+            continue;
+        }
+
+        unsigned char entry[52];
+        int found = 0;
+        uint32_t tz_offset = 0, tz_len = 0;
+
+        while (ftell(f) + 52 <= (long)data_off) {
+            if (fread(entry, 1, 52, f) != 52) break;
+            char name[41];
+            memcpy(name, entry, 40);
+            name[40] = '\0';
+            if (strcmp(name, tz_name) == 0) {
+                tz_offset = read_be32(entry + 40);
+                tz_len = read_be32(entry + 44);
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found || tz_len < 10) {
+            fclose(f);
+            continue;
+        }
+
+        if (fseek(f, data_off + tz_offset, SEEK_SET) != 0) {
+            fclose(f);
+            continue;
+        }
+
+        unsigned char *tz_buf = malloc(tz_len);
+        if (!tz_buf) {
+            fclose(f);
+            continue;
+        }
+
+        if (fread(tz_buf, 1, tz_len, f) != tz_len) {
+            free(tz_buf);
+            fclose(f);
+            continue;
+        }
+        fclose(f);
+
+        if (memcmp(tz_buf, "TZif", 4) == 0) {
+            if (parse_tzif_footer(tz_buf, tz_len, out_tz, out_len) == 0 && out_tz[0] != '\0') {
+                free(tz_buf);
+                return 0;
+            }
+            if (parse_tzif_v1_fallback(tz_buf, tz_len, time(NULL), out_tz, out_len) == 0) {
+                free(tz_buf);
+                return 0;
+            }
+        }
+        free(tz_buf);
+    }
+    return -1;
+}
+
+static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "/system/bin/getprop %s", prop_name);
+    FILE *p = popen(cmd, "r");
+    if (!p) {
+        snprintf(cmd, sizeof(cmd), "getprop %s", prop_name);
+        p = popen(cmd, "r");
+    }
+    if (!p) return -1;
+
+    if (fgets(out_val, out_len, p) != NULL) {
+        pclose(p);
+        char *end = out_val + strlen(out_val) - 1;
+        while (end >= out_val && (*end == '\r' || *end == '\n' || *end == ' ' || *end == '\t')) {
+            *end = '\0';
+            end--;
+        }
+        return (out_val[0] != '\0') ? 0 : -1;
+    }
+    pclose(p);
+    return -1;
+}
+
+static int convert_offset_to_posix(const char *offset_str, char *out_tz, size_t out_len) {
+    if (!offset_str || offset_str[0] == '\0') return -1;
+    const char *s = offset_str;
+    while (isspace((unsigned char)*s)) s++;
+    if (strncasecmp(s, "UTC", 3) == 0) s += 3;
+    else if (strncasecmp(s, "GMT", 3) == 0) s += 3;
+    while (isspace((unsigned char)*s)) s++;
+
+    int sign = 1;
+    if (*s == '+') { sign = 1; s++; }
+    else if (*s == '-') { sign = -1; s++; }
+    else if (isdigit((unsigned char)*s)) { sign = 1; }
+    else return -1;
+
+    int hours = 0, mins = 0;
+    if (strchr(s, ':')) {
+        if (sscanf(s, "%d:%d", &hours, &mins) < 1) return -1;
+    } else {
+        int val = atoi(s);
+        if (strlen(s) >= 3 || val >= 100 || val <= -100) {
+            hours = abs(val) / 100;
+            mins = abs(val) % 100;
+        } else {
+            hours = abs(val);
+            mins = 0;
+        }
+    }
+
+    if (hours > 14 || mins >= 60) return -1;
+
+    char posix_sign = (sign >= 0) ? '-' : '+';
+    if (mins != 0) {
+        snprintf(out_tz, out_len, "UTC%c%d:%02d", posix_sign, hours, mins);
+    } else {
+        snprintf(out_tz, out_len, "UTC%c%d", posix_sign, hours);
+    }
+    return 0;
+}
+
+static void init_timezone(const char *custom_tz) {
+    char posix_tz[128] = {0};
+
+    // 1. If custom timezone specified in config
+    if (custom_tz && custom_tz[0] != '\0') {
+        if (convert_offset_to_posix(custom_tz, posix_tz, sizeof(posix_tz)) == 0) {
+            setenv("TZ", posix_tz, 1);
+            tzset();
+            return;
+        }
+        if (get_posix_tz_from_android_tzdata(custom_tz, posix_tz, sizeof(posix_tz)) == 0) {
+            setenv("TZ", posix_tz, 1);
+            tzset();
+            return;
+        }
+        setenv("TZ", custom_tz, 1);
+        tzset();
+        return;
+    }
+
+    // 2. Check if TZ environment variable is already set
+    const char *env_tz = getenv("TZ");
+    if (env_tz && env_tz[0] != '\0') {
+        if (strchr(env_tz, '+') || strchr(env_tz, '-') || isdigit((unsigned char)env_tz[0]) || access(env_tz, R_OK) == 0) {
+            tzset();
+            return;
+        }
+        if (get_posix_tz_from_android_tzdata(env_tz, posix_tz, sizeof(posix_tz)) == 0) {
+            setenv("TZ", posix_tz, 1);
+            tzset();
+            return;
+        }
+        tzset();
+        return;
+    }
+
+    // 3. Try reading Android system property persist.sys.timezone
+    char prop_tz[64] = {0};
+    if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        if (get_posix_tz_from_android_tzdata(prop_tz, posix_tz, sizeof(posix_tz)) == 0) {
+            setenv("TZ", posix_tz, 1);
+            tzset();
+            return;
+        }
+    }
+
+    // 4. Fallback: try /system/bin/date +%z
+    char date_z[32] = {0};
+    FILE *pz = popen("/system/bin/date +%z 2>/dev/null", "r");
+    if (pz) {
+        if (fgets(date_z, sizeof(date_z), pz) != NULL) {
+            char *end = date_z + strlen(date_z) - 1;
+            while (end >= date_z && (*end == '\r' || *end == '\n' || *end == ' ')) *end-- = '\0';
+            if (convert_offset_to_posix(date_z, posix_tz, sizeof(posix_tz)) == 0) {
+                pclose(pz);
+                setenv("TZ", posix_tz, 1);
+                tzset();
+                return;
+            }
+        }
+        pclose(pz);
+    }
+
+    // 5. Fallback on standard Linux /etc/timezone
+    FILE *ftz = fopen("/etc/timezone", "r");
+    if (ftz) {
+        char line[64];
+        if (fgets(line, sizeof(line), ftz)) {
+            char *end = line + strlen(line) - 1;
+            while (end >= line && (*end == '\r' || *end == '\n' || *end == ' ')) *end-- = '\0';
+            if (line[0] != '\0') {
+                if (get_posix_tz_from_android_tzdata(line, posix_tz, sizeof(posix_tz)) == 0) {
+                    setenv("TZ", posix_tz, 1);
+                } else {
+                    setenv("TZ", line, 1);
+                }
+                tzset();
+                fclose(ftz);
+                return;
+            }
+        }
+        fclose(ftz);
+    }
+
+    tzset();
+}
+
 static void load_config(void) {
     snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "sing-box");
     g_cfg.work_dir[0] = '\0';
     snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "root:net_admin");
+    g_cfg.timezone[0] = '\0';
     g_cfg.max_log_size = 1048576L;
     g_cfg.stop_timeout = 10;
     g_cfg.start_timeout = 3;
@@ -342,12 +638,25 @@ static void load_config(void) {
     if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s/run_error.log", g_cfg.log_dir);
     if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s/%s.log", g_cfg.log_dir, g_cfg.service_name);
     if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s/.box.lock", g_cfg.work_dir);
+
+    init_timezone(g_cfg.timezone);
 }
 
 static void ts(char *buffer, size_t size) {
+    static int tz_inited = 0;
+    if (!tz_inited) {
+        init_timezone(g_cfg.timezone[0] != '\0' ? g_cfg.timezone : NULL);
+        tz_inited = 1;
+    }
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", tm_info);
+    if (tm_info) {
+        strftime(buffer, size, "%Y-%m-%d %H:%M:%S", tm_info);
+    } else {
+        struct tm gm;
+        gmtime_r(&now, &gm);
+        strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &gm);
+    }
 }
 
 static void rotate_log(const char *filepath) {
