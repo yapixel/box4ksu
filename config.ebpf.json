@@ -20,10 +20,8 @@
       "access_control_allow_private_network": true,
       "dashboard": {
         "enabled": true,
-        "path": "/dist",
-        "download_url": "",
-        "http_client": "detour_proxy",
-        "update_interval": "24h"
+        "path": "dashboard",
+        "http_client": "detour_proxy"
       }
     }
   ],
