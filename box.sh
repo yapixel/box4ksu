@@ -13,6 +13,7 @@ ERROR_LOG="${LOG_DIR}/run_error.log"
 LOCK_DIR="${WORK_DIR}/.box.lock"
 
 RUN_USER="root:net_admin"     # user:group for setuidgid
+TZ="auto"                     # Timezone ("Asia/Shanghai", "auto")
 MAX_LOG_SIZE=1048576          # Rotate log when exceeding 1MB
 STOP_TIMEOUT=10               # Max wait time (seconds) after SIGTERM
 START_TIMEOUT=3               # Seconds to verify process survival after start
@@ -20,6 +21,49 @@ CHECK_CONFIG=0                # Enable pre-start configuration validation (0=dis
 NOFILE_LIMIT=1000000
 
 umask 022
+
+# ================= Initialization =================
+load_ini() {
+    _ini=""
+    if [ -f "${WORK_DIR}/box.ini" ]; then
+        _ini="${WORK_DIR}/box.ini"
+    elif [ -f "$(dirname "$0")/box.ini" ]; then
+        _ini="$(dirname "$0")/box.ini"
+    elif [ -f "/data/adb/sing-box/box.ini" ]; then
+        _ini="/data/adb/sing-box/box.ini"
+    fi
+    [ -n "${_ini}" ] || return 0
+
+    while IFS='=' read -r key val || [ -n "$key" ]; do
+        key=$(echo "${key}" | tr -d ' \t\r\n')
+        case "${key}" in
+            ''|\#*|\;*|\[*) continue ;;
+        esac
+        val=$(echo "${val}" | sed -e 's/[#;].*$//' -e 's/^[ \t]*//;s/[ \t\r\n]*$//' -e 's/^["'\'']\(.*\)["'\'']$/\1/')
+        case "${key}" in
+            SERVICE_NAME|service_name) [ -n "${val}" ] && SERVICE_NAME="${val}" ;;
+            WORK_DIR|work_dir)         [ -n "${val}" ] && WORK_DIR="${val}" ;;
+            RUN_USER|run_user)         [ -n "${val}" ] && RUN_USER="${val}" ;;
+            TZ|tz|TIMEZONE|timezone)   [ -n "${val}" ] && TZ="${val}" ;;
+            MAX_LOG_SIZE|max_log_size) [ -n "${val}" ] && MAX_LOG_SIZE="${val}" ;;
+            STOP_TIMEOUT|stop_timeout) [ -n "${val}" ] && STOP_TIMEOUT="${val}" ;;
+            START_TIMEOUT|start_timeout) [ -n "${val}" ] && START_TIMEOUT="${val}" ;;
+            CHECK_CONFIG|check_config) [ -n "${val}" ] && CHECK_CONFIG="${val}" ;;
+            NOFILE_LIMIT|nofile_limit) [ -n "${val}" ] && NOFILE_LIMIT="${val}" ;;
+        esac
+    done < "${_ini}"
+}
+
+init_tz() {
+    if [ -z "${TZ}" ] || [ "${TZ}" = "auto" ]; then
+        _tz=$(getprop persist.sys.timezone 2>/dev/null)
+        [ -z "${_tz}" ] && _tz=$(getprop ro.sys.timezone 2>/dev/null)
+        [ -z "${_tz}" ] && _tz="Asia/Shanghai"
+        export TZ="${_tz}"
+    else
+        export TZ="${TZ}"
+    fi
+}
 
 # ================= Core Functions =================
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -47,6 +91,9 @@ error_log() {
 
 # ================= Environment Validation =================
 prepare_env() {
+    load_ini
+    init_tz
+
     # Create required directories
     mkdir -p "${WORK_DIR}" 2>/dev/null
     mkdir -p "${LOG_DIR}" 2>/dev/null
@@ -242,7 +289,7 @@ start() {
     log "Starting ${SERVICE_NAME}..."
     rotate_log "${LOG_FILE}"; rotate_log "${ERROR_LOG}"
 
-    nohup busybox setuidgid "${RUN_USER}" "${BIN_PATH}" run -D "${WORK_DIR}" \
+    nohup busybox setuidgid "${RUN_USER}" env TZ="${TZ}" "${BIN_PATH}" run -D "${WORK_DIR}" \
         < /dev/null >> "${LOG_DIR}/sing-box.log" 2>&1 &
     new_pid=$!
     echo "${new_pid}" > "${PID_FILE}"

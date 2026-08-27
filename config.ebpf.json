@@ -6,6 +6,13 @@
     "output": "sing-box.log",
     "timestamp": true
   },
+  "ntp": {
+    "enabled": true,
+    "server": "ntp.aliyun.com",
+    "server_port": 123,
+    "interval": "30m",
+    "detour": "direct"
+  },
   "services": [
     {
       "type": "api",

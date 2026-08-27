@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <dirent.h>
+#include <grp.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -253,35 +254,35 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
     expand_vars(exp_val, sizeof(exp_val), val);
 
     if (strcasecmp(key, "service_name") == 0) {
-        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%s", exp_val);
+        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%.127s", exp_val);
     } else if (strcasecmp(key, "work_dir") == 0) {
-        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", exp_val);
+        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.511s", exp_val);
         *has_workdir = 1;
     } else if (strcasecmp(key, "bin_path") == 0) {
-        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s", exp_val);
+        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.511s", exp_val);
         *has_bin = 1;
     } else if (strcasecmp(key, "pid_file") == 0) {
-        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s", exp_val);
+        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.511s", exp_val);
         *has_pid = 1;
     } else if (strcasecmp(key, "log_dir") == 0) {
-        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s", exp_val);
+        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.511s", exp_val);
         *has_logdir = 1;
     } else if (strcasecmp(key, "log_file") == 0) {
-        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s", exp_val);
+        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.511s", exp_val);
         *has_logfile = 1;
     } else if (strcasecmp(key, "error_log") == 0) {
-        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s", exp_val);
+        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.511s", exp_val);
         *has_errlog = 1;
     } else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) {
-        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s", exp_val);
+        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.511s", exp_val);
         *has_sblog = 1;
     } else if (strcasecmp(key, "lock_dir") == 0) {
-        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s", exp_val);
+        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.511s", exp_val);
         *has_lockdir = 1;
     } else if (strcasecmp(key, "run_user") == 0) {
-        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", exp_val);
+        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%.127s", exp_val);
     } else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) {
-        snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%s", exp_val);
+        snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%.127s", exp_val);
     } else if (strcasecmp(key, "max_log_size") == 0) {
         g_cfg.max_log_size = atol(exp_val);
     } else if (strcasecmp(key, "stop_timeout") == 0) {
@@ -498,11 +499,14 @@ static int convert_offset_to_posix(const char *offset_str, char *out_tz, size_t 
     return 0;
 }
 
+static char g_iana_tz[128] = "Asia/Shanghai";
+
 static void init_timezone(const char *custom_tz) {
     char posix_tz[128] = {0};
 
     // 1. If custom timezone specified in config
-    if (custom_tz && custom_tz[0] != '\0') {
+    if (custom_tz && custom_tz[0] != '\0' && strcasecmp(custom_tz, "auto") != 0) {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", custom_tz);
         if (convert_offset_to_posix(custom_tz, posix_tz, sizeof(posix_tz)) == 0) {
             setenv("TZ", posix_tz, 1);
             tzset();
@@ -520,7 +524,10 @@ static void init_timezone(const char *custom_tz) {
 
     // 2. Check if TZ environment variable is already set
     const char *env_tz = getenv("TZ");
-    if (env_tz && env_tz[0] != '\0') {
+    if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0) {
+        if (strchr(env_tz, '/')) {
+            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
+        }
         if (strchr(env_tz, '+') || strchr(env_tz, '-') || isdigit((unsigned char)env_tz[0]) || access(env_tz, R_OK) == 0) {
             tzset();
             return;
@@ -537,6 +544,7 @@ static void init_timezone(const char *custom_tz) {
     // 3. Try reading Android system property persist.sys.timezone
     char prop_tz[64] = {0};
     if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
         if (get_posix_tz_from_android_tzdata(prop_tz, posix_tz, sizeof(posix_tz)) == 0) {
             setenv("TZ", posix_tz, 1);
             tzset();
@@ -544,7 +552,17 @@ static void init_timezone(const char *custom_tz) {
         }
     }
 
-    // 4. Fallback: try /system/bin/date +%z
+    // 4. Try ro.sys.timezone / ro.build.timezone
+    if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+        if (get_posix_tz_from_android_tzdata(prop_tz, posix_tz, sizeof(posix_tz)) == 0) {
+            setenv("TZ", posix_tz, 1);
+            tzset();
+            return;
+        }
+    }
+
+    // 5. Fallback: try /system/bin/date +%z
     char date_z[32] = {0};
     FILE *pz = popen("/system/bin/date +%z 2>/dev/null", "r");
     if (pz) {
@@ -561,7 +579,7 @@ static void init_timezone(const char *custom_tz) {
         pclose(pz);
     }
 
-    // 5. Fallback on standard Linux /etc/timezone
+    // 6. Fallback on standard Linux /etc/timezone
     FILE *ftz = fopen("/etc/timezone", "r");
     if (ftz) {
         char line[64];
@@ -569,6 +587,7 @@ static void init_timezone(const char *custom_tz) {
             char *end = line + strlen(line) - 1;
             while (end >= line && (*end == '\r' || *end == '\n' || *end == ' ')) *end-- = '\0';
             if (line[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", line);
                 if (get_posix_tz_from_android_tzdata(line, posix_tz, sizeof(posix_tz)) == 0) {
                     setenv("TZ", posix_tz, 1);
                 } else {
@@ -601,8 +620,8 @@ static void load_config(void) {
     char self_dir[512];
     get_self_dir(self_dir, sizeof(self_dir));
 
-    char self_ini[512];
-    snprintf(self_ini, sizeof(self_ini), "%s/box.ini", self_dir);
+    char self_ini[600];
+    snprintf(self_ini, sizeof(self_ini), "%.500s/box.ini", self_dir);
 
     const char *candidates[] = {
         "box.ini",
@@ -626,18 +645,18 @@ static void load_config(void) {
 
     if (!has_workdir) {
         if (self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", self_dir);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.511s", self_dir);
         } else {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%s", g_cfg.service_name);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%.127s", g_cfg.service_name);
         }
     }
-    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%s/bin/%s", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%s/%s.pid", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%s/logs", g_cfg.work_dir);
-    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%s/run.log", g_cfg.log_dir);
-    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%s/run_error.log", g_cfg.log_dir);
-    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%s/%s.log", g_cfg.log_dir, g_cfg.service_name);
-    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%s/.box.lock", g_cfg.work_dir);
+    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.350s/bin/%.127s", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.350s/%.127s.pid", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.450s/logs", g_cfg.work_dir);
+    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.450s/run.log", g_cfg.log_dir);
+    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.450s/run_error.log", g_cfg.log_dir);
+    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.350s/%.127s.log", g_cfg.log_dir, g_cfg.service_name);
+    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.450s/.box.lock", g_cfg.work_dir);
 
     init_timezone(g_cfg.timezone);
 }
@@ -1025,6 +1044,9 @@ static int display_status(void) {
     }
 
     log_info("%s service is running (PID: %d)", SERVICE_NAME, pid);
+    if (g_iana_tz[0] != '\0') {
+        log_info("Timezone: %s", g_iana_tz);
+    }
 
     char status_path[256];
     snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
@@ -1315,6 +1337,10 @@ static int start_service(void) {
             dup2(log_fd, STDOUT_FILENO);
             dup2(log_fd, STDERR_FILENO);
             if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
+        }
+
+        if (g_iana_tz[0] != '\0') {
+            setenv("TZ", g_iana_tz, 1);
         }
 
         apply_credentials(RUN_USER);

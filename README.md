@@ -176,6 +176,7 @@ tail -f /data/adb/sing-box/logs/sing-box.log
 SERVICE_NAME="sing-box"          # 服务名称
 WORK_DIR="/data/adb/sing-box"    # 工作目录
 RUN_USER="root:net_admin"        # 运行用户:组
+TZ="auto"                        # 时区 (如 "Asia/Shanghai" 或 "auto" 自动跟随系统)
 MAX_LOG_SIZE=1048576             # 日志轮转阈值 (1MB)
 STOP_TIMEOUT=10                  # 停止超时时间 (秒)
 START_TIMEOUT=3                  # 启动验证时间 (秒)
