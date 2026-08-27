@@ -2,9 +2,16 @@
   "$schema": "https://sing-box.sagernet.org/schema.json",
   "log": {
     "disabled": false,
-    "level": "info",
+    "level": "error",
     "output": "sing-box.log",
     "timestamp": true
+  },
+  "ntp": {
+    "enabled": true,
+    "server": "ntp.aliyun.com",
+    "server_port": 123,
+    "interval": "30m",
+    "detour": "direct"
   },
   "services": [
     {
@@ -48,14 +55,29 @@
     "servers": [
       {
         "tag": "dns-proxy",
-        "type": "tls",
-        "server": "1.1.1.1",
+        "type": "https",
+        "server": "cloudflare-dns.com",
+        "domain_resolver": "dns-hosts",
         "detour": "Proxy"
       },
       {
         "tag": "dns-direct",
+        "type": "group",
+        "servers": [
+          "ali-doh",
+          "tencent-doh"
+        ]
+      },
+      {
+        "tag": "ali-doh",
         "type": "https",
         "server": "dns.alidns.com",
+        "domain_resolver": "dns-hosts"
+      },
+      {
+        "tag": "tencent-doh",
+        "type": "https",
+        "server": "doh.pub",
         "domain_resolver": "dns-hosts"
       },
       {
@@ -69,6 +91,10 @@
           "doh.pub": [
             "120.53.53.53",
             "1.12.12.12"
+          ],
+          "cloudflare-dns.com": [
+            "1.1.1.1",
+            "1.0.0.1"
           ]
         }
       }
@@ -364,6 +390,10 @@
         "action": "hijack-dns"
       },
       {
+        "protocol": "quic",
+        "action": "reject"
+      },
+      {
         "clash_mode": "Direct",
         "action": "route",
         "outbound": "direct"
@@ -383,7 +413,20 @@
       {
         "process_name": [
           "Weixin.exe",
-          "BaiduNetdiskUnite.exe"
+          "WeChat.exe",
+          "WeChatAppEx.exe",
+          "QQ.exe",
+          "DingTalk.exe",
+          "wemeetapp.exe",
+          "BaiduNetdiskUnite.exe",
+          "BaiduNetdisk.exe",
+          "Thunder.exe",
+          "cloudmusic.exe",
+          "QQMusic.exe",
+          "ToDesk.exe",
+          "SunloginClient.exe",
+          "TeamViewer.exe",
+          "Steam.exe"
         ],
         "action": "route",
         "outbound": "direct"
