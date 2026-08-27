@@ -1,0 +1,18 @@
+{
+  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "outbound_providers": [
+    {
+      "tag": "vk",
+      "type": "remote",
+      "url": "https://example.com/your_subscription_link",
+      "update_interval": "2h",
+      "http_client": "detour_proxy",
+      "path": "providers/vk.json"
+    },
+    {
+      "tag": "ruaue",
+      "type": "local",
+      "path": "providers/ruaue.json"
+    }
+  ]
+}

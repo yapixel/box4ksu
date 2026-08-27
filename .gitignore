@@ -16,3 +16,8 @@ logs/
 # Backup files
 *.bak
 *~
+
+# Private subscription providers
+providers.json
+outbound_providers.json
+*.secret.json
