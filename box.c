@@ -174,29 +174,20 @@ static void expand_vars(char *dst, size_t dst_size, const char *src) {
     size_t di = 0, si = 0, len = strlen(src);
     while (si < len && di < sizeof(temp) - 1) {
         if (src[si] == '$') {
-            if (strncmp(src + si, "${SERVICE_NAME}", 15) == 0) {
-                size_t vlen = strlen(g_cfg.service_name);
+            const char *val = NULL;
+            size_t skip = 0;
+            if (strncmp(src + si, "${SERVICE_NAME}", 15) == 0) { val = g_cfg.service_name; skip = 15; }
+            else if (strncmp(src + si, "$SERVICE_NAME", 13) == 0) { val = g_cfg.service_name; skip = 13; }
+            else if (strncmp(src + si, "${WORK_DIR}", 11) == 0) { val = g_cfg.work_dir; skip = 11; }
+            else if (strncmp(src + si, "$WORK_DIR", 9) == 0) { val = g_cfg.work_dir; skip = 9; }
+
+            if (val) {
+                size_t vlen = strlen(val);
                 if (di + vlen < sizeof(temp) - 1) {
-                    memcpy(temp + di, g_cfg.service_name, vlen);
-                    di += vlen; si += 15; continue;
-                }
-            } else if (strncmp(src + si, "$SERVICE_NAME", 13) == 0) {
-                size_t vlen = strlen(g_cfg.service_name);
-                if (di + vlen < sizeof(temp) - 1) {
-                    memcpy(temp + di, g_cfg.service_name, vlen);
-                    di += vlen; si += 13; continue;
-                }
-            } else if (strncmp(src + si, "${WORK_DIR}", 11) == 0) {
-                size_t vlen = strlen(g_cfg.work_dir);
-                if (di + vlen < sizeof(temp) - 1) {
-                    memcpy(temp + di, g_cfg.work_dir, vlen);
-                    di += vlen; si += 11; continue;
-                }
-            } else if (strncmp(src + si, "$WORK_DIR", 9) == 0) {
-                size_t vlen = strlen(g_cfg.work_dir);
-                if (di + vlen < sizeof(temp) - 1) {
-                    memcpy(temp + di, g_cfg.work_dir, vlen);
-                    di += vlen; si += 9; continue;
+                    memcpy(temp + di, val, vlen);
+                    di += vlen;
+                    si += skip;
+                    continue;
                 }
             }
         }
@@ -336,50 +327,33 @@ static long parse_offset_string(const char *s) {
 static long get_tz_offset_from_name(const char *tz_name) {
     if (!tz_name || tz_name[0] == '\0') return 28800;
 
-    if (strcasecmp(tz_name, "Asia/Shanghai") == 0 || strcasecmp(tz_name, "Asia/Chongqing") == 0 ||
-        strcasecmp(tz_name, "Asia/Harbin") == 0 || strcasecmp(tz_name, "Asia/Urumqi") == 0 ||
-        strcasecmp(tz_name, "Asia/Kashgar") == 0 || strcasecmp(tz_name, "Asia/Hong_Kong") == 0 ||
-        strcasecmp(tz_name, "Asia/Macau") == 0 || strcasecmp(tz_name, "Asia/Taipei") == 0 ||
-        strcasecmp(tz_name, "Asia/Singapore") == 0 || strcasecmp(tz_name, "Asia/Kuala_Lumpur") == 0 ||
-        strcasecmp(tz_name, "Asia/Manila") == 0 || strcasecmp(tz_name, "Asia/Perth") == 0 ||
-        strcasecmp(tz_name, "Asia/Brunei") == 0 || strcasecmp(tz_name, "Asia/Makassar") == 0 ||
-        strcasecmp(tz_name, "PRC") == 0 || strcasecmp(tz_name, "China") == 0 ||
-        strcasecmp(tz_name, "CST") == 0 || strcasecmp(tz_name, "CST-8") == 0 || strcasecmp(tz_name, "Etc/GMT-8") == 0) {
-        return 28800;
+    static const struct { const char *name; long offset; } tz_tbl[] = {
+        {"Asia/Shanghai", 28800}, {"Asia/Chongqing", 28800}, {"Asia/Harbin", 28800},
+        {"Asia/Urumqi", 28800}, {"Asia/Kashgar", 28800}, {"Asia/Hong_Kong", 28800},
+        {"Asia/Macau", 28800}, {"Asia/Taipei", 28800}, {"Asia/Singapore", 28800},
+        {"Asia/Kuala_Lumpur", 28800}, {"Asia/Manila", 28800}, {"Asia/Perth", 28800},
+        {"Asia/Brunei", 28800}, {"Asia/Makassar", 28800}, {"PRC", 28800},
+        {"China", 28800}, {"CST", 28800}, {"CST-8", 28800}, {"Etc/GMT-8", 28800},
+        {"Asia/Tokyo", 32400}, {"Asia/Seoul", 32400}, {"JST", 32400}, {"KST", 32400},
+        {"Asia/Bangkok", 25200}, {"Asia/Jakarta", 25200}, {"Asia/Ho_Chi_Minh", 25200},
+        {"Asia/Kolkata", 19800}, {"Asia/Calcutta", 19800}, {"IST", 19800},
+        {"Asia/Dubai", 14400}, {"GST", 14400},
+        {"Europe/London", 0}, {"UTC", 0}, {"GMT", 0}, {"Zulu", 0}, {"Etc/UTC", 0},
+        {"Europe/Berlin", 3600}, {"Europe/Paris", 3600}, {"Europe/Rome", 3600},
+        {"CET", 3600}, {"America/New_York", -18000}, {"EST", -18000},
+        {"America/Chicago", -21600}, {"CDT", -21600},
+        {"America/Denver", -25200}, {"MST", -25200},
+        {"America/Los_Angeles", -28800}, {"PST", -28800},
+        {NULL, 0}
+    };
+
+    for (int i = 0; tz_tbl[i].name != NULL; i++) {
+        if (strcasecmp(tz_name, tz_tbl[i].name) == 0) return tz_tbl[i].offset;
     }
-    if (strcasecmp(tz_name, "Asia/Tokyo") == 0 || strcasecmp(tz_name, "Asia/Seoul") == 0 ||
-        strcasecmp(tz_name, "JST") == 0 || strcasecmp(tz_name, "KST") == 0 || strcasecmp(tz_name, "Etc/GMT-9") == 0) {
-        return 32400;
-    }
-    if (strcasecmp(tz_name, "Asia/Bangkok") == 0 || strcasecmp(tz_name, "Asia/Jakarta") == 0 ||
-        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0 || strcasecmp(tz_name, "Etc/GMT-7") == 0) {
-        return 25200;
-    }
-    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0 || strcasecmp(tz_name, "IST") == 0) {
-        return 19800;
-    }
-    if (strcasecmp(tz_name, "Asia/Dubai") == 0 || strcasecmp(tz_name, "GST") == 0) {
-        return 14400;
-    }
-    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 ||
-        strcasecmp(tz_name, "GMT") == 0 || strcasecmp(tz_name, "Universal") == 0 ||
-        strcasecmp(tz_name, "Zulu") == 0 || strcasecmp(tz_name, "Etc/UTC") == 0 || strcasecmp(tz_name, "Etc/GMT") == 0) {
-        return 0;
-    }
-    if (strcasecmp(tz_name, "Europe/Berlin") == 0 || strcasecmp(tz_name, "Europe/Paris") == 0 ||
-        strcasecmp(tz_name, "Europe/Rome") == 0 || strcasecmp(tz_name, "Europe/Madrid") == 0 ||
-        strcasecmp(tz_name, "CET") == 0 || strcasecmp(tz_name, "Etc/GMT-1") == 0) {
-        return 3600;
-    }
-    if (strcasecmp(tz_name, "America/New_York") == 0 || strcasecmp(tz_name, "EST") == 0) return -18000;
-    if (strcasecmp(tz_name, "America/Chicago") == 0 || strcasecmp(tz_name, "CDT") == 0) return -21600;
-    if (strcasecmp(tz_name, "America/Denver") == 0 || strcasecmp(tz_name, "MST") == 0) return -25200;
-    if (strcasecmp(tz_name, "America/Los_Angeles") == 0 || strcasecmp(tz_name, "PST") == 0) return -28800;
 
     if (strchr(tz_name, '+') || strchr(tz_name, '-') || strncasecmp(tz_name, "UTC", 3) == 0 || strncasecmp(tz_name, "GMT", 3) == 0) {
         return parse_offset_string(tz_name);
     }
-
     return 28800;
 }
 
