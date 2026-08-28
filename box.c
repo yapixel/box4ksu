@@ -423,25 +423,32 @@ static void load_config(void) {
 
     for (int i = 0; candidates[i] != NULL; i++) {
         int fd = open(candidates[i], O_RDONLY);
-        if (fd >= 0) {
-            char buf[2048];
-            ssize_t n = read(fd, buf, sizeof(buf) - 1);
-            close(fd);
-            if (n > 0) {
-                buf[n] = '\0';
-                char *line = buf;
-                while (*line) {
-                    char *next = strchr(line, '\n');
-                    if (next) *next = '\0';
-                    char *r = strchr(line, '\r');
-                    if (r) *r = '\0';
-                    parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
-                    if (!next) break;
-                    line = next + 1;
+        if (fd < 0) continue;
+        char buf[256];
+        char line[256];
+        int lpos = 0;
+        ssize_t n;
+        int found = 1;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            for (ssize_t j = 0; j < n; j++) {
+                char c = buf[j];
+                if (c == '\n' || c == '\r') {
+                    if (lpos > 0) {
+                        line[lpos] = '\0';
+                        parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+                        lpos = 0;
+                    }
+                } else if (lpos < (int)sizeof(line) - 1) {
+                    line[lpos++] = c;
                 }
-                break;
             }
         }
+        if (lpos > 0) {
+            line[lpos] = '\0';
+            parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+        }
+        close(fd);
+        if (found) break;
     }
 
     if (!has_workdir || g_cfg.work_dir[0] == '\0') {
@@ -485,7 +492,7 @@ static void ts(char *buffer, size_t size) {
     struct tm tm_info;
     gmtime_r(&local_now, &tm_info);
     snprintf(buffer, size, "%04d-%02d-%02d %02d:%02d:%02d",
-             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+             (tm_info.tm_year + 1900) % 10000, tm_info.tm_mon + 1, tm_info.tm_mday,
              tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
 }
 
@@ -593,9 +600,6 @@ static void create_dirs_recursive(const char *path) {
 static void prepare_env(void) {
     create_dirs_recursive(WORK_DIR);
     create_dirs_recursive(LOG_DIR);
-    char bin_dir[300];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", WORK_DIR);
-    create_dirs_recursive(bin_dir);
 
     if (geteuid() != 0 && getuid() != 0) {
         log_error("Root privileges required");
@@ -820,11 +824,11 @@ static void fmt_uptime(long seconds, char *buf, size_t size) {
     long m = (seconds % 3600) / 60;
     long s = seconds % 60;
 
-    buf[0] = '\0';
-    if (d > 0) snprintf(buf + strlen(buf), size - strlen(buf), "%ldd ", d);
-    if (h > 0) snprintf(buf + strlen(buf), size - strlen(buf), "%ldh ", h);
-    if (m > 0) snprintf(buf + strlen(buf), size - strlen(buf), "%ldm ", m);
-    snprintf(buf + strlen(buf), size - strlen(buf), "%lds", s);
+    int pos = 0;
+    if (d > 0) pos += snprintf(buf + pos, size - pos, "%ldd ", d);
+    if (h > 0) pos += snprintf(buf + pos, size - pos, "%ldh ", h);
+    if (m > 0) pos += snprintf(buf + pos, size - pos, "%ldm ", m);
+    snprintf(buf + pos, size - pos, "%lds", s);
 }
 
 static int count_proc_sockets(pid_t pid) {
@@ -921,12 +925,15 @@ static int display_status(void) {
             if (right_paren) {
                 unsigned long long utime = 0, stime = 0, starttime = 0;
                 int field_idx = 3;
-                char *token = strtok(right_paren + 2, " ");
-                while (token) {
-                    if (field_idx == 14) utime = strtoull(token, NULL, 10);
-                    else if (field_idx == 15) stime = strtoull(token, NULL, 10);
-                    else if (field_idx == 22) { starttime = strtoull(token, NULL, 10); break; }
-                    token = strtok(NULL, " ");
+                char *p = right_paren + 2;
+                while (*p && field_idx <= 22) {
+                    while (*p == ' ') p++;
+                    char *tok_end = p;
+                    while (*tok_end && *tok_end != ' ') tok_end++;
+                    if (field_idx == 14) utime = strtoull(p, NULL, 10);
+                    else if (field_idx == 15) stime = strtoull(p, NULL, 10);
+                    else if (field_idx == 22) { starttime = strtoull(p, NULL, 10); break; }
+                    p = tok_end;
                     field_idx++;
                 }
 
@@ -1037,26 +1044,8 @@ static int do_check(void) {
     return 0;
 }
 
-static void check_stale_pid(void) {
-    if (access(PID_FILE, F_OK) == 0) {
-        int fd = open(PID_FILE, O_RDONLY);
-        if (fd >= 0) {
-            char pbuf[32];
-            ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
-            close(fd);
-            if (n > 0) {
-                pbuf[n] = '\0';
-                pid_t old_pid = (pid_t)atoi(pbuf);
-                if (old_pid > 0 && kill(old_pid, 0) != 0) {
-                    log_info("Cleaning stale PID file (PID %d not found)", old_pid);
-                    clear_pid();
-                }
-            } else {
-                clear_pid();
-            }
-        }
-    }
-}
+
+
 
 static int start_service(void) {
     if (is_running()) {
@@ -1164,8 +1153,6 @@ static int start_service(void) {
 }
 
 static int stop_service(void) {
-    check_stale_pid();
-
     pid_t pid = get_pid();
     if (pid <= 0) {
         log_info("%s is not running.", SERVICE_NAME);
@@ -1218,7 +1205,6 @@ static int restart_service(void) {
             return 1;
         }
     } else {
-        check_stale_pid();
         clear_pid();
     }
 
