@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -11,26 +10,25 @@
 #include <stdarg.h>
 #include <dirent.h>
 #include <grp.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/time.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <sys/sysinfo.h>
-#include <ctype.h>
 
 typedef struct {
-    char service_name[128];
-    char work_dir[512];
-    char bin_path[512];
-    char pid_file[512];
-    char log_dir[512];
-    char log_file[512];
-    char error_log[512];
-    char singbox_log[512];
-    char lock_dir[512];
-    char run_user[128];
-    char timezone[128];
+    char service_name[64];
+    char work_dir[256];
+    char bin_path[256];
+    char pid_file[256];
+    char log_dir[256];
+    char log_file[256];
+    char error_log[256];
+    char singbox_log[256];
+    char lock_dir[256];
+    char run_user[64];
+    char timezone[64];
     long max_log_size;
     int stop_timeout;
     int start_timeout;
@@ -58,6 +56,8 @@ static Config g_cfg;
 #define NOFILE_LIMIT    g_cfg.nofile_limit
 
 static int g_lock_acquired = 0;
+static long g_tz_offset_sec = 28800; // Default +8h (CST UTC+8)
+static char g_iana_tz[64] = "Asia/Shanghai";
 
 static pid_t get_pid(void);
 static void clear_pid(void);
@@ -69,8 +69,20 @@ static int stop_service(void);
 static int restart_service(void);
 static int reload_service(void);
 
+// ================= String & Path Utilities =================
+
+static char *trim_str(char *str) {
+    if (!str) return NULL;
+    while (isspace((unsigned char)*str) || *str == '"' || *str == '\'' || *str == '[' || *str == ']') str++;
+    if (*str == '\0') return str;
+    char *end = str + strlen(str) - 1;
+    while (end > str && (isspace((unsigned char)*end) || *end == '"' || *end == '\'' || *end == '[' || *end == ']' || *end == '\r' || *end == '\n')) end--;
+    end[1] = '\0';
+    return str;
+}
+
 static void get_self_dir(char *dir_buf, size_t size) {
-    char exe_path[512];
+    char exe_path[256];
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len > 0) {
         exe_path[len] = '\0';
@@ -85,19 +97,16 @@ static void get_self_dir(char *dir_buf, size_t size) {
 }
 
 static int get_real_path(const char *path, char *resolved, size_t size) {
-    char *res = realpath(path, resolved);
-    if (res != NULL) {
-        return 0;
-    }
+    if (realpath(path, resolved) != NULL) return 0;
     snprintf(resolved, size, "%s", path);
     return -1;
 }
 
+// ================= Permission & User Utilities =================
+
 static uid_t resolve_uid(const char *name) {
     if (!name || name[0] == '\0') return 0;
-    if (isdigit((unsigned char)name[0])) {
-        return (uid_t)atoi(name);
-    }
+    if (isdigit((unsigned char)name[0])) return (uid_t)atoi(name);
     if (strcmp(name, "root") == 0) return 0;
     if (strcmp(name, "system") == 0) return 1000;
     if (strcmp(name, "shell") == 0) return 2000;
@@ -107,9 +116,7 @@ static uid_t resolve_uid(const char *name) {
 
 static gid_t resolve_gid(const char *name) {
     if (!name || name[0] == '\0') return 0;
-    if (isdigit((unsigned char)name[0])) {
-        return (gid_t)atoi(name);
-    }
+    if (isdigit((unsigned char)name[0])) return (gid_t)atoi(name);
     if (strcmp(name, "root") == 0) return 0;
     if (strcmp(name, "system") == 0) return 1000;
     if (strcmp(name, "shell") == 0) return 2000;
@@ -125,11 +132,9 @@ static gid_t resolve_gid(const char *name) {
 
 static int apply_credentials(const char *user_spec) {
     if (!user_spec || user_spec[0] == '\0') return 0;
-    if (strcmp(user_spec, "root") == 0 || strcmp(user_spec, "root:root") == 0 || strcmp(user_spec, "0:0") == 0) {
-        return 0;
-    }
+    if (strcmp(user_spec, "root") == 0 || strcmp(user_spec, "root:root") == 0 || strcmp(user_spec, "0:0") == 0) return 0;
 
-    char spec_copy[128];
+    char spec_copy[64];
     snprintf(spec_copy, sizeof(spec_copy), "%s", user_spec);
 
     char *colon = strchr(spec_copy, ':');
@@ -144,7 +149,7 @@ static int apply_credentials(const char *user_spec) {
     uid_t target_uid = resolve_uid(user_part);
     gid_t target_gid = (group_part && group_part[0] != '\0') ? resolve_gid(group_part) : (gid_t)target_uid;
 
-    gid_t groups[8];
+    gid_t groups[4];
     int group_count = 0;
     groups[group_count++] = target_gid;
 
@@ -154,63 +159,42 @@ static int apply_credentials(const char *user_spec) {
     }
 
     setgroups(group_count, groups);
-    if (setresgid(target_gid, target_gid, target_gid) != 0) {
-        setgid(target_gid);
-    }
-    if (setresuid(target_uid, target_uid, target_uid) != 0) {
-        setuid(target_uid);
-    }
+    if (setresgid(target_gid, target_gid, target_gid) != 0) setgid(target_gid);
+    if (setresuid(target_uid, target_uid, target_uid) != 0) setuid(target_uid);
 
     return 0;
 }
 
-static char *trim_str(char *str) {
-    while (isspace((unsigned char)*str)) str++;
-    if (*str == 0) return str;
-    char *end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) end--;
-    end[1] = '\0';
-    return str;
-}
+// ================= Configuration & INI Parser =================
 
 static void expand_vars(char *dst, size_t dst_size, const char *src) {
-    char temp[512];
-    size_t di = 0;
-    size_t si = 0;
-    size_t len = strlen(src);
+    char temp[256];
+    size_t di = 0, si = 0, len = strlen(src);
     while (si < len && di < sizeof(temp) - 1) {
         if (src[si] == '$') {
             if (strncmp(src + si, "${SERVICE_NAME}", 15) == 0) {
                 size_t vlen = strlen(g_cfg.service_name);
                 if (di + vlen < sizeof(temp) - 1) {
                     memcpy(temp + di, g_cfg.service_name, vlen);
-                    di += vlen;
-                    si += 15;
-                    continue;
+                    di += vlen; si += 15; continue;
                 }
             } else if (strncmp(src + si, "$SERVICE_NAME", 13) == 0) {
                 size_t vlen = strlen(g_cfg.service_name);
                 if (di + vlen < sizeof(temp) - 1) {
                     memcpy(temp + di, g_cfg.service_name, vlen);
-                    di += vlen;
-                    si += 13;
-                    continue;
+                    di += vlen; si += 13; continue;
                 }
             } else if (strncmp(src + si, "${WORK_DIR}", 11) == 0) {
                 size_t vlen = strlen(g_cfg.work_dir);
                 if (di + vlen < sizeof(temp) - 1) {
                     memcpy(temp + di, g_cfg.work_dir, vlen);
-                    di += vlen;
-                    si += 11;
-                    continue;
+                    di += vlen; si += 11; continue;
                 }
             } else if (strncmp(src + si, "$WORK_DIR", 9) == 0) {
                 size_t vlen = strlen(g_cfg.work_dir);
                 if (di + vlen < sizeof(temp) - 1) {
                     memcpy(temp + di, g_cfg.work_dir, vlen);
-                    di += vlen;
-                    si += 9;
-                    continue;
+                    di += vlen; si += 9; continue;
                 }
             }
         }
@@ -222,7 +206,7 @@ static void expand_vars(char *dst, size_t dst_size, const char *src) {
 
 static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir, int *has_workdir) {
     line = trim_str(line);
-    if (line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return;
+    if (!line || line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return;
 
     char *eq = strchr(line, '=');
     if (!eq) return;
@@ -231,73 +215,34 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
     char *key = trim_str(line);
     char *val = trim_str(eq + 1);
 
-    if (val[0] == '"' || val[0] == '\'') {
-        char quote = val[0];
-        char *closing = strrchr(val + 1, quote);
-        if (closing) {
-            *closing = '\0';
-            val++;
-            val = trim_str(val);
-        } else {
-            val++;
-            val = trim_str(val);
-        }
-    } else {
-        char *comment = strpbrk(val, "#;");
-        if (comment) {
-            *comment = '\0';
-            val = trim_str(val);
-        }
+    char *comment = strpbrk(val, "#;");
+    if (comment) {
+        *comment = '\0';
+        val = trim_str(val);
     }
 
-    char exp_val[512];
+    char exp_val[256];
     expand_vars(exp_val, sizeof(exp_val), val);
 
-    if (strcasecmp(key, "service_name") == 0) {
-        snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%.127s", exp_val);
-    } else if (strcasecmp(key, "work_dir") == 0) {
-        snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.511s", exp_val);
-        *has_workdir = 1;
-    } else if (strcasecmp(key, "bin_path") == 0) {
-        snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.511s", exp_val);
-        *has_bin = 1;
-    } else if (strcasecmp(key, "pid_file") == 0) {
-        snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.511s", exp_val);
-        *has_pid = 1;
-    } else if (strcasecmp(key, "log_dir") == 0) {
-        snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.511s", exp_val);
-        *has_logdir = 1;
-    } else if (strcasecmp(key, "log_file") == 0) {
-        snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.511s", exp_val);
-        *has_logfile = 1;
-    } else if (strcasecmp(key, "error_log") == 0) {
-        snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.511s", exp_val);
-        *has_errlog = 1;
-    } else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) {
-        snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.511s", exp_val);
-        *has_sblog = 1;
-    } else if (strcasecmp(key, "lock_dir") == 0) {
-        snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.511s", exp_val);
-        *has_lockdir = 1;
-    } else if (strcasecmp(key, "run_user") == 0) {
-        snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%.127s", exp_val);
-    } else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) {
-        snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%.127s", exp_val);
-    } else if (strcasecmp(key, "max_log_size") == 0) {
-        g_cfg.max_log_size = atol(exp_val);
-    } else if (strcasecmp(key, "stop_timeout") == 0) {
-        g_cfg.stop_timeout = atoi(exp_val);
-    } else if (strcasecmp(key, "start_timeout") == 0) {
-        g_cfg.start_timeout = atoi(exp_val);
-    } else if (strcasecmp(key, "check_config") == 0) {
-        g_cfg.check_config = atoi(exp_val);
-    } else if (strcasecmp(key, "nofile_limit") == 0) {
-        g_cfg.nofile_limit = atol(exp_val);
-    }
+    if (strcasecmp(key, "service_name") == 0) snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%.63s", exp_val);
+    else if (strcasecmp(key, "work_dir") == 0) { snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.255s", exp_val); *has_workdir = 1; }
+    else if (strcasecmp(key, "bin_path") == 0) { snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.255s", exp_val); *has_bin = 1; }
+    else if (strcasecmp(key, "pid_file") == 0) { snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.255s", exp_val); *has_pid = 1; }
+    else if (strcasecmp(key, "log_dir") == 0) { snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.255s", exp_val); *has_logdir = 1; }
+    else if (strcasecmp(key, "log_file") == 0) { snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.255s", exp_val); *has_logfile = 1; }
+    else if (strcasecmp(key, "error_log") == 0) { snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.255s", exp_val); *has_errlog = 1; }
+    else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) { snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.255s", exp_val); *has_sblog = 1; }
+    else if (strcasecmp(key, "lock_dir") == 0) { snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.255s", exp_val); *has_lockdir = 1; }
+    else if (strcasecmp(key, "run_user") == 0) snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%.63s", exp_val);
+    else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%.63s", exp_val);
+    else if (strcasecmp(key, "max_log_size") == 0) g_cfg.max_log_size = atol(exp_val);
+    else if (strcasecmp(key, "stop_timeout") == 0) g_cfg.stop_timeout = atoi(exp_val);
+    else if (strcasecmp(key, "start_timeout") == 0) g_cfg.start_timeout = atoi(exp_val);
+    else if (strcasecmp(key, "check_config") == 0) g_cfg.check_config = atoi(exp_val);
+    else if (strcasecmp(key, "nofile_limit") == 0) g_cfg.nofile_limit = atol(exp_val);
 }
 
-static long g_tz_offset_sec = 28800; // Default +8 hours (CST UTC+8)
-static char g_iana_tz[128] = "Asia/Shanghai";
+// ================= Android Property & Timezone =================
 
 static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
     if (!prop_name || !out_val || out_len == 0) return -1;
@@ -336,7 +281,7 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     close(pipe_fd[1]);
 
     ssize_t total = 0;
-    char buf[256];
+    char buf[128];
     while (total < (ssize_t)sizeof(buf) - 1) {
         ssize_t n = read(pipe_fd[0], buf + total, sizeof(buf) - 1 - total);
         if (n <= 0) break;
@@ -348,15 +293,8 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     int status = 0;
     waitpid(pid, &status, 0);
 
-    char *p = buf;
-    while (isspace((unsigned char)*p) || *p == '[' || *p == '"' || *p == '\'') p++;
-    char *end = p + strlen(p) - 1;
-    while (end >= p && (isspace((unsigned char)*end) || *end == ']' || *end == '"' || *end == '\'')) {
-        *end = '\0';
-        end--;
-    }
-
-    if (p[0] != '\0') {
+    char *p = trim_str(buf);
+    if (p && p[0] != '\0') {
         snprintf(out_val, out_len, "%s", p);
         return 0;
     }
@@ -366,8 +304,7 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
 static long parse_offset_string(const char *s) {
     if (!s || s[0] == '\0') return 0;
     while (isspace((unsigned char)*s)) s++;
-    if (strncasecmp(s, "UTC", 3) == 0) s += 3;
-    else if (strncasecmp(s, "GMT", 3) == 0) s += 3;
+    if (strncasecmp(s, "UTC", 3) == 0 || strncasecmp(s, "GMT", 3) == 0) s += 3;
     while (isspace((unsigned char)*s)) s++;
 
     int sign = 1;
@@ -389,84 +326,51 @@ static long parse_offset_string(const char *s) {
             mins = 0;
         }
     }
-    long total = (long)hours * 3600 + (long)mins * 60;
-    return sign * total;
+    return sign * ((long)hours * 3600 + (long)mins * 60);
 }
 
 static long get_tz_offset_from_name(const char *tz_name) {
     if (!tz_name || tz_name[0] == '\0') return 28800;
 
-    if (strcasecmp(tz_name, "Asia/Shanghai") == 0 ||
-        strcasecmp(tz_name, "Asia/Chongqing") == 0 ||
-        strcasecmp(tz_name, "Asia/Harbin") == 0 ||
-        strcasecmp(tz_name, "Asia/Urumqi") == 0 ||
-        strcasecmp(tz_name, "Asia/Kashgar") == 0 ||
-        strcasecmp(tz_name, "Asia/Hong_Kong") == 0 ||
-        strcasecmp(tz_name, "Asia/Macau") == 0 ||
-        strcasecmp(tz_name, "Asia/Taipei") == 0 ||
-        strcasecmp(tz_name, "Asia/Singapore") == 0 ||
-        strcasecmp(tz_name, "Asia/Kuala_Lumpur") == 0 ||
-        strcasecmp(tz_name, "Asia/Manila") == 0 ||
-        strcasecmp(tz_name, "Asia/Perth") == 0 ||
-        strcasecmp(tz_name, "Asia/Brunei") == 0 ||
-        strcasecmp(tz_name, "Asia/Makassar") == 0 ||
-        strcasecmp(tz_name, "Asia/Jayapura") == 0 ||
-        strcasecmp(tz_name, "PRC") == 0 ||
-        strcasecmp(tz_name, "China") == 0 ||
-        strcasecmp(tz_name, "CST") == 0 ||
-        strcasecmp(tz_name, "CST-8") == 0 ||
-        strcasecmp(tz_name, "Etc/GMT-8") == 0) {
+    if (strcasecmp(tz_name, "Asia/Shanghai") == 0 || strcasecmp(tz_name, "Asia/Chongqing") == 0 ||
+        strcasecmp(tz_name, "Asia/Harbin") == 0 || strcasecmp(tz_name, "Asia/Urumqi") == 0 ||
+        strcasecmp(tz_name, "Asia/Kashgar") == 0 || strcasecmp(tz_name, "Asia/Hong_Kong") == 0 ||
+        strcasecmp(tz_name, "Asia/Macau") == 0 || strcasecmp(tz_name, "Asia/Taipei") == 0 ||
+        strcasecmp(tz_name, "Asia/Singapore") == 0 || strcasecmp(tz_name, "Asia/Kuala_Lumpur") == 0 ||
+        strcasecmp(tz_name, "Asia/Manila") == 0 || strcasecmp(tz_name, "Asia/Perth") == 0 ||
+        strcasecmp(tz_name, "Asia/Brunei") == 0 || strcasecmp(tz_name, "Asia/Makassar") == 0 ||
+        strcasecmp(tz_name, "PRC") == 0 || strcasecmp(tz_name, "China") == 0 ||
+        strcasecmp(tz_name, "CST") == 0 || strcasecmp(tz_name, "CST-8") == 0 || strcasecmp(tz_name, "Etc/GMT-8") == 0) {
         return 28800;
     }
-    if (strcasecmp(tz_name, "Asia/Tokyo") == 0 ||
-        strcasecmp(tz_name, "Asia/Seoul") == 0 ||
-        strcasecmp(tz_name, "Asia/Pyongyang") == 0 ||
-        strcasecmp(tz_name, "JST") == 0 ||
-        strcasecmp(tz_name, "KST") == 0 ||
-        strcasecmp(tz_name, "Etc/GMT-9") == 0) {
+    if (strcasecmp(tz_name, "Asia/Tokyo") == 0 || strcasecmp(tz_name, "Asia/Seoul") == 0 ||
+        strcasecmp(tz_name, "JST") == 0 || strcasecmp(tz_name, "KST") == 0 || strcasecmp(tz_name, "Etc/GMT-9") == 0) {
         return 32400;
     }
-    if (strcasecmp(tz_name, "Asia/Bangkok") == 0 ||
-        strcasecmp(tz_name, "Asia/Jakarta") == 0 ||
-        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0 ||
-        strcasecmp(tz_name, "Asia/Phnom_Penh") == 0 ||
-        strcasecmp(tz_name, "Asia/Vientiane") == 0 ||
-        strcasecmp(tz_name, "Etc/GMT-7") == 0) {
+    if (strcasecmp(tz_name, "Asia/Bangkok") == 0 || strcasecmp(tz_name, "Asia/Jakarta") == 0 ||
+        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0 || strcasecmp(tz_name, "Etc/GMT-7") == 0) {
         return 25200;
     }
-    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0 || strcasecmp(tz_name, "Asia/Colombo") == 0 || strcasecmp(tz_name, "IST") == 0) {
+    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0 || strcasecmp(tz_name, "IST") == 0) {
         return 19800;
     }
-    if (strcasecmp(tz_name, "Asia/Dubai") == 0 || strcasecmp(tz_name, "Asia/Muscat") == 0 || strcasecmp(tz_name, "GST") == 0) {
+    if (strcasecmp(tz_name, "Asia/Dubai") == 0 || strcasecmp(tz_name, "GST") == 0) {
         return 14400;
     }
-    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 || strcasecmp(tz_name, "GMT") == 0 || strcasecmp(tz_name, "Universal") == 0 || strcasecmp(tz_name, "Zulu") == 0 || strcasecmp(tz_name, "Etc/UTC") == 0 || strcasecmp(tz_name, "Etc/GMT") == 0) {
+    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 ||
+        strcasecmp(tz_name, "GMT") == 0 || strcasecmp(tz_name, "Universal") == 0 ||
+        strcasecmp(tz_name, "Zulu") == 0 || strcasecmp(tz_name, "Etc/UTC") == 0 || strcasecmp(tz_name, "Etc/GMT") == 0) {
         return 0;
     }
-    if (strcasecmp(tz_name, "Europe/Berlin") == 0 ||
-        strcasecmp(tz_name, "Europe/Paris") == 0 ||
-        strcasecmp(tz_name, "Europe/Rome") == 0 ||
-        strcasecmp(tz_name, "Europe/Madrid") == 0 ||
-        strcasecmp(tz_name, "Europe/Amsterdam") == 0 ||
-        strcasecmp(tz_name, "Europe/Brussels") == 0 ||
-        strcasecmp(tz_name, "Europe/Vienna") == 0 ||
-        strcasecmp(tz_name, "Europe/Warsaw") == 0 ||
-        strcasecmp(tz_name, "CET") == 0 ||
-        strcasecmp(tz_name, "Etc/GMT-1") == 0) {
+    if (strcasecmp(tz_name, "Europe/Berlin") == 0 || strcasecmp(tz_name, "Europe/Paris") == 0 ||
+        strcasecmp(tz_name, "Europe/Rome") == 0 || strcasecmp(tz_name, "Europe/Madrid") == 0 ||
+        strcasecmp(tz_name, "CET") == 0 || strcasecmp(tz_name, "Etc/GMT-1") == 0) {
         return 3600;
     }
-    if (strcasecmp(tz_name, "America/New_York") == 0 || strcasecmp(tz_name, "EST") == 0 || strcasecmp(tz_name, "America/Detroit") == 0 || strcasecmp(tz_name, "America/Toronto") == 0) {
-        return -18000;
-    }
-    if (strcasecmp(tz_name, "America/Chicago") == 0 || strcasecmp(tz_name, "America/Winnipeg") == 0) {
-        return -21600;
-    }
-    if (strcasecmp(tz_name, "America/Denver") == 0 || strcasecmp(tz_name, "MST") == 0) {
-        return -25200;
-    }
-    if (strcasecmp(tz_name, "America/Los_Angeles") == 0 || strcasecmp(tz_name, "PST") == 0 || strcasecmp(tz_name, "America/Vancouver") == 0) {
-        return -28800;
-    }
+    if (strcasecmp(tz_name, "America/New_York") == 0 || strcasecmp(tz_name, "EST") == 0) return -18000;
+    if (strcasecmp(tz_name, "America/Chicago") == 0 || strcasecmp(tz_name, "CDT") == 0) return -21600;
+    if (strcasecmp(tz_name, "America/Denver") == 0 || strcasecmp(tz_name, "MST") == 0) return -25200;
+    if (strcasecmp(tz_name, "America/Los_Angeles") == 0 || strcasecmp(tz_name, "PST") == 0) return -28800;
 
     if (strchr(tz_name, '+') || strchr(tz_name, '-') || strncasecmp(tz_name, "UTC", 3) == 0 || strncasecmp(tz_name, "GMT", 3) == 0) {
         return parse_offset_string(tz_name);
@@ -476,48 +380,37 @@ static long get_tz_offset_from_name(const char *tz_name) {
 }
 
 static void init_timezone(const char *custom_tz) {
-    char tz_buf[128] = {0};
+    char tz_buf[64] = {0};
     
     if (custom_tz && custom_tz[0] != '\0' && strcasecmp(custom_tz, "auto") != 0) {
-        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", custom_tz);
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", custom_tz);
     } else {
         const char *env_tz = getenv("TZ");
         if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0 && strchr(env_tz, '/')) {
-            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
+            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", env_tz);
         } else {
             char prop_tz[64] = {0};
-            
             if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            }
-            else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            }
-            else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            }
-            else {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
+            } else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
+            } else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
+            } else {
                 FILE *tz_file = fopen("/etc/timezone", "r");
                 if (tz_file) {
                     if (fgets(tz_buf, sizeof(tz_buf), tz_file)) {
-                        char *newline = strchr(tz_buf, '\n');
-                        if (newline) *newline = '\0';
-                        if (tz_buf[0] != '\0') {
-                            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", tz_buf);
-                        }
+                        char *trimmed = trim_str(tz_buf);
+                        if (trimmed && trimmed[0] != '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", trimmed);
                     }
                     fclose(tz_file);
                 }
             }
-            
-            if (g_iana_tz[0] == '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
-            }
+            if (g_iana_tz[0] == '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
         }
     }
 
     g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
-    
     setenv("TZ", g_iana_tz, 1);
     tzset();
 }
@@ -535,11 +428,11 @@ static void load_config(void) {
 
     int has_bin = 0, has_pid = 0, has_logdir = 0, has_logfile = 0, has_errlog = 0, has_sblog = 0, has_lockdir = 0, has_workdir = 0;
 
-    char self_dir[512];
+    char self_dir[256];
     get_self_dir(self_dir, sizeof(self_dir));
 
-    char self_ini[600];
-    snprintf(self_ini, sizeof(self_ini), "%.500s/box.ini", self_dir);
+    char self_ini[300];
+    snprintf(self_ini, sizeof(self_ini), "%s/box.ini", self_dir);
 
     const char *candidates[] = {
         "/data/adb/sing-box/box.ini",
@@ -552,7 +445,7 @@ static void load_config(void) {
     for (int i = 0; candidates[i] != NULL; i++) {
         FILE *f = fopen(candidates[i], "r");
         if (f) {
-            char line[512];
+            char line[256];
             while (fgets(line, sizeof(line), f)) {
                 parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
             }
@@ -572,22 +465,24 @@ static void load_config(void) {
                           strstr(self_dir, "/magisk") != NULL);
 
         if (!is_sys_bin && self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.511s", self_dir);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.255s", self_dir);
         } else {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%.127s", g_cfg.service_name);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%.63s", g_cfg.service_name);
         }
     }
 
-    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.350s/bin/%.127s", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.350s/%.127s.pid", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.450s/logs", g_cfg.work_dir);
-    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.450s/run.log", g_cfg.log_dir);
-    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.450s/run_error.log", g_cfg.log_dir);
-    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.350s/%.127s.log", g_cfg.log_dir, g_cfg.service_name);
-    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.450s/.box.lock", g_cfg.work_dir);
+    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.180s/bin/%.60s", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.180s/%.60s.pid", g_cfg.work_dir, g_cfg.service_name);
+    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.240s/logs", g_cfg.work_dir);
+    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.240s/run.log", g_cfg.log_dir);
+    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.230s/run_error.log", g_cfg.log_dir);
+    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.180s/%.60s.log", g_cfg.log_dir, g_cfg.service_name);
+    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.240s/.box.lock", g_cfg.work_dir);
 
     init_timezone(g_cfg.timezone);
 }
+
+// ================= Logging System =================
 
 static void ts(char *buffer, size_t size) {
     static int tz_inited = 0;
@@ -606,61 +501,45 @@ static void rotate_log(const char *filepath) {
     struct stat st;
     if (stat(filepath, &st) != 0) return;
     if (st.st_size > MAX_LOG_SIZE) {
-        char backup_path[1024];
+        char backup_path[300];
         snprintf(backup_path, sizeof(backup_path), "%s.1", filepath);
         rename(filepath, backup_path);
     }
 }
 
-static void log_info(const char *fmt, ...) {
-    rotate_log(LOG_FILE);
-    char timestamp[64];
+static void log_msg(int is_err, const char *fmt, ...) {
+    const char *target_file = is_err ? ERROR_LOG : LOG_FILE;
+    rotate_log(target_file);
+
+    char timestamp[32];
     ts(timestamp, sizeof(timestamp));
 
-    char message[2048];
+    char message[1024];
     va_list args;
     va_start(args, fmt);
     vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
 
-    if (isatty(STDOUT_FILENO)) {
-        printf("[%s] \033[32m[INFO]\033[0m %s\n", timestamp, message);
-    } else {
-        printf("[%s] [INFO] %s\n", timestamp, message);
-    }
-    fflush(stdout);
+    FILE *out = is_err ? stderr : stdout;
+    const char *tag = is_err ? "[ERROR]" : "[INFO]";
+    const char *color_tag = is_err ? "\033[31m[ERROR]\033[0m" : "\033[32m[INFO]\033[0m";
 
-    FILE *f = fopen(LOG_FILE, "a");
+    if (isatty(fileno(out))) {
+        fprintf(out, "[%s] %s %s\n", timestamp, color_tag, message);
+    } else {
+        fprintf(out, "[%s] %s %s\n", timestamp, tag, message);
+    }
+    fflush(out);
+
+    FILE *f = fopen(target_file, "a");
     if (f) {
-        fprintf(f, "[%s] [INFO] %s\n", timestamp, message);
+        fprintf(f, "[%s] %s %s\n", timestamp, tag, message);
         fclose(f);
     }
 }
 
-static void log_error(const char *fmt, ...) {
-    rotate_log(ERROR_LOG);
-    char timestamp[64];
-    ts(timestamp, sizeof(timestamp));
-
-    char message[2048];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(message, sizeof(message), fmt, args);
-    va_end(args);
-
-    if (isatty(STDERR_FILENO)) {
-        fprintf(stderr, "[%s] \033[31m[ERROR]\033[0m %s\n", timestamp, message);
-    } else {
-        fprintf(stderr, "[%s] [ERROR] %s\n", timestamp, message);
-    }
-    fflush(stderr);
-
-    FILE *f = fopen(ERROR_LOG, "a");
-    if (f) {
-        fprintf(f, "[%s] [ERROR] %s\n", timestamp, message);
-        fclose(f);
-    }
-}
+#define log_info(...)  log_msg(0, __VA_ARGS__)
+#define log_error(...) log_msg(1, __VA_ARGS__)
 
 static void show_tail(const char *filepath, int lines) {
     if (lines <= 0) lines = 10;
@@ -705,14 +584,14 @@ static void show_tail(const char *filepath, int lines) {
         }
     }
     printf("%s", start);
-    if (bytes > 0 && buf[bytes - 1] != '\n') {
-        printf("\n");
-    }
+    if (bytes > 0 && buf[bytes - 1] != '\n') printf("\n");
     free(buf);
 }
 
+// ================= Process & Lock Management =================
+
 static void create_dirs_recursive(const char *path) {
-    char temp[1024];
+    char temp[300];
     snprintf(temp, sizeof(temp), "%s", path);
     size_t len = strlen(temp);
     if (len == 0) return;
@@ -730,20 +609,18 @@ static void create_dirs_recursive(const char *path) {
 static void prepare_env(void) {
     create_dirs_recursive(WORK_DIR);
     create_dirs_recursive(LOG_DIR);
-    char bin_dir[1024];
+    char bin_dir[300];
     snprintf(bin_dir, sizeof(bin_dir), "%s/bin", WORK_DIR);
     create_dirs_recursive(bin_dir);
 
     if (geteuid() != 0 && getuid() != 0) {
-        char timestamp[64];
-        ts(timestamp, sizeof(timestamp));
-        fprintf(stderr, "[%s] [ERROR] Root privileges required\n", timestamp);
+        log_error("Root privileges required");
         exit(1);
     }
 }
 
 static void remove_lock_dir(void) {
-    char pid_path[600];
+    char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
     unlink(pid_path);
     rmdir(LOCK_DIR);
@@ -757,7 +634,7 @@ static void release_lock(void) {
 }
 
 static void write_lock_pid(void) {
-    char pid_path[600];
+    char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
     FILE *f = fopen(pid_path, "w");
     if (f) {
@@ -767,7 +644,7 @@ static void write_lock_pid(void) {
 }
 
 static int is_lock_stale(void) {
-    char pid_path[600];
+    char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
     FILE *f = fopen(pid_path, "r");
     if (f) {
@@ -779,7 +656,7 @@ static int is_lock_stale(void) {
                 if (lock_pid == getpid()) return 0;
                 if (kill(lock_pid, 0) != 0 && errno == ESRCH) return 1;
 
-                char comm_path[256];
+                char comm_path[64];
                 snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", lock_pid);
                 FILE *cf = fopen(comm_path, "r");
                 if (cf) {
@@ -787,9 +664,7 @@ static int is_lock_stale(void) {
                     if (fgets(comm, sizeof(comm), cf)) {
                         comm[strcspn(comm, "\r\n")] = 0;
                         fclose(cf);
-                        if (strstr(comm, "box") != NULL) {
-                            return 0;
-                        }
+                        if (strstr(comm, "box") != NULL) return 0;
                     } else {
                         fclose(cf);
                     }
@@ -846,11 +721,10 @@ static void acquire_lock(void) {
 static pid_t check_proc_pid(pid_t p) {
     if (p <= 0 || kill(p, 0) != 0) return -1;
 
-    char expected_bin[512];
+    char expected_bin[256];
     get_real_path(BIN_PATH, expected_bin, sizeof(expected_bin));
 
-    char exe_path[256];
-    char link_target[512];
+    char exe_path[64], link_target[256];
     snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", p);
     ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
     if (len > 0) {
@@ -860,23 +734,21 @@ static pid_t check_proc_pid(pid_t p) {
         }
     }
 
-    char cmdline_path[256];
+    char cmdline_path[64];
     snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", p);
     FILE *fcmd = fopen(cmdline_path, "r");
     if (fcmd) {
-        char cmd_buf[1024] = {0};
+        char cmd_buf[512] = {0};
         size_t n = fread(cmd_buf, 1, sizeof(cmd_buf) - 1, fcmd);
         fclose(fcmd);
         if (n > 0) {
             int match_bin = (strstr(cmd_buf, SERVICE_NAME) != NULL);
             int match_dir = (WORK_DIR[0] != '\0' && memmem(cmd_buf, n, WORK_DIR, strlen(WORK_DIR)) != NULL);
-            if (match_bin && match_dir) {
-                return p;
-            }
+            if (match_bin && match_dir) return p;
         }
     }
 
-    char comm_path[256];
+    char comm_path[64];
     snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
     FILE *fcomm = fopen(comm_path, "r");
     if (fcomm) {
@@ -915,7 +787,7 @@ static pid_t scan_proc_for_service(void) {
 static pid_t get_pid(void) {
     FILE *f = fopen(PID_FILE, "r");
     if (f) {
-        char pbuf[64];
+        char pbuf[32];
         if (fgets(pbuf, sizeof(pbuf), f)) {
             pid_t p = (pid_t)atoi(pbuf);
             if (p > 0 && check_proc_pid(p) > 0) {
@@ -947,15 +819,13 @@ static void clear_pid(void) {
     unlink(PID_FILE);
 }
 
+// ================= Status Formatting =================
+
 static void fmt_mem(long long kb, char *buf, size_t size) {
     if (kb >= 1048576LL) {
-        long long whole = kb / 1048576LL;
-        long long frac = ((kb % 1048576LL) * 100LL) / 1048576LL;
-        snprintf(buf, size, "%lld.%02lld GB", whole, frac);
+        snprintf(buf, size, "%lld.%02lld GB", kb / 1048576LL, ((kb % 1048576LL) * 100LL) / 1048576LL);
     } else if (kb >= 1024LL) {
-        long long whole = kb / 1024LL;
-        long long frac = ((kb % 1024LL) * 100LL) / 1024LL;
-        snprintf(buf, size, "%lld.%02lld MB", whole, frac);
+        snprintf(buf, size, "%lld.%02lld MB", kb / 1024LL, ((kb % 1024LL) * 100LL) / 1024LL);
     } else {
         snprintf(buf, size, "%lld kB", kb);
     }
@@ -990,11 +860,11 @@ static int display_status(void) {
         log_info("Timezone: %s (UTC%c%02d:%02d)", g_iana_tz, sign, off_h, off_m);
     }
 
-    char status_path[256];
+    char status_path[64];
     snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
     FILE *f = fopen(status_path, "r");
     if (f) {
-        char line[256];
+        char line[128];
         long long mem_kb = -1;
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "VmRSS:", 6) == 0) {
@@ -1006,7 +876,7 @@ static int display_status(void) {
         }
         fclose(f);
         if (mem_kb >= 0) {
-            char mem_str[64];
+            char mem_str[32];
             fmt_mem(mem_kb, mem_str, sizeof(mem_str));
             log_info("Memory usage: %s", mem_str);
         }
@@ -1018,16 +888,14 @@ static int display_status(void) {
         sys_uptime_sec = (long long)bts.tv_sec;
     } else {
         struct sysinfo si;
-        if (sysinfo(&si) == 0) {
-            sys_uptime_sec = (long long)si.uptime;
-        }
+        if (sysinfo(&si) == 0) sys_uptime_sec = (long long)si.uptime;
     }
 
-    char stat_path[256];
+    char stat_path[64];
     snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
     FILE *stat_f = fopen(stat_path, "r");
     if (stat_f) {
-        char stat_buf[1024];
+        char stat_buf[512];
         if (fgets(stat_buf, sizeof(stat_buf), stat_f)) {
             char *right_paren = strrchr(stat_buf, ')');
             if (right_paren) {
@@ -1035,14 +903,9 @@ static int display_status(void) {
                 int field_idx = 3;
                 char *token = strtok(right_paren + 2, " ");
                 while (token) {
-                    if (field_idx == 14) {
-                        utime = strtoull(token, NULL, 10);
-                    } else if (field_idx == 15) {
-                        stime = strtoull(token, NULL, 10);
-                    } else if (field_idx == 22) {
-                        starttime = strtoull(token, NULL, 10);
-                        break;
-                    }
+                    if (field_idx == 14) utime = strtoull(token, NULL, 10);
+                    else if (field_idx == 15) stime = strtoull(token, NULL, 10);
+                    else if (field_idx == 22) { starttime = strtoull(token, NULL, 10); break; }
                     token = strtok(NULL, " ");
                     field_idx++;
                 }
@@ -1067,7 +930,7 @@ static int display_status(void) {
                     log_info("CPU usage: 0.0%% (avg)");
                 }
 
-                char uptime_str[64];
+                char uptime_str[32];
                 fmt_uptime((long)total_sec, uptime_str, sizeof(uptime_str));
                 log_info("Uptime: %s", uptime_str);
             }
@@ -1075,7 +938,7 @@ static int display_status(void) {
         fclose(stat_f);
     }
 
-    char fd_dir[256];
+    char fd_dir[64];
     snprintf(fd_dir, sizeof(fd_dir), "/proc/%d/fd", pid);
     DIR *dir = opendir(fd_dir);
     if (dir) {
@@ -1083,26 +946,23 @@ static int display_status(void) {
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
             if (entry->d_name[0] == '.') continue;
-            char sym_path[512];
-            char target[256];
-            snprintf(sym_path, sizeof(sym_path), "%s/%s", fd_dir, entry->d_name);
+            char sym_path[256], target[64];
+            snprintf(sym_path, sizeof(sym_path), "%.60s/%.60s", fd_dir, entry->d_name);
             ssize_t len = readlink(sym_path, target, sizeof(target) - 1);
             if (len > 0) {
                 target[len] = '\0';
-                if (strncmp(target, "socket:", 7) == 0) {
-                    socket_count++;
-                }
+                if (strncmp(target, "socket:", 7) == 0) socket_count++;
             }
         }
         closedir(dir);
         log_info("Network sockets: %d", socket_count);
     }
 
-    char io_path[256];
+    char io_path[64];
     snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
     FILE *io_f = fopen(io_path, "r");
     if (io_f) {
-        char line[256];
+        char line[128];
         long long read_bytes = -1, write_bytes = -1;
         while (fgets(line, sizeof(line), io_f)) {
             if (strncmp(line, "read_bytes:", 11) == 0) {
@@ -1118,30 +978,16 @@ static int display_status(void) {
         fclose(io_f);
         if (read_bytes >= 0 && write_bytes >= 0) {
             char r_str[32], w_str[32];
-            if (read_bytes >= 1073741824LL) {
-                long long whole = read_bytes / 1073741824LL;
-                long long frac = ((read_bytes % 1073741824LL) * 100LL) / 1073741824LL;
-                snprintf(r_str, sizeof(r_str), "%lld.%02lld GB", whole, frac);
-            } else {
-                long long whole = read_bytes / 1048576LL;
-                long long frac = ((read_bytes % 1048576LL) * 100LL) / 1048576LL;
-                snprintf(r_str, sizeof(r_str), "%lld.%02lld MB", whole, frac);
-            }
-            if (write_bytes >= 1073741824LL) {
-                long long whole = write_bytes / 1073741824LL;
-                long long frac = ((write_bytes % 1073741824LL) * 100LL) / 1073741824LL;
-                snprintf(w_str, sizeof(w_str), "%lld.%02lld GB", whole, frac);
-            } else {
-                long long whole = write_bytes / 1048576LL;
-                long long frac = ((write_bytes % 1048576LL) * 100LL) / 1048576LL;
-                snprintf(w_str, sizeof(w_str), "%lld.%02lld MB", whole, frac);
-            }
+            fmt_mem(read_bytes / 1024LL, r_str, sizeof(r_str));
+            fmt_mem(write_bytes / 1024LL, w_str, sizeof(w_str));
             log_info("Disk I/O: read %s / write %s", r_str, w_str);
         }
     }
 
     return 0;
 }
+
+// ================= Service Operations =================
 
 static int do_check(void) {
     if (access(BIN_PATH, X_OK) != 0) {
@@ -1151,7 +997,7 @@ static int do_check(void) {
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        log_error("Failed to create pipe for validation: %s", strerror(errno));
+        log_error("Failed to create pipe: %s", strerror(errno));
         return 1;
     }
 
@@ -1159,7 +1005,7 @@ static int do_check(void) {
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        log_error("Failed to fork for validation: %s", strerror(errno));
+        log_error("Failed to fork: %s", strerror(errno));
         return 1;
     }
 
@@ -1173,12 +1019,10 @@ static int do_check(void) {
     }
 
     close(pipefd[1]);
-    char output[2048] = {0};
+    char output[1024] = {0};
     size_t total = 0;
     ssize_t n;
-    while ((n = read(pipefd[0], output + total, sizeof(output) - 1 - total)) > 0) {
-        total += n;
-    }
+    while ((n = read(pipefd[0], output + total, sizeof(output) - 1 - total)) > 0) total += n;
     output[total] = '\0';
     close(pipefd[0]);
 
@@ -1187,9 +1031,7 @@ static int do_check(void) {
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         log_error("Configuration validation failed:");
-        if (total > 0) {
-            log_error("%s", output);
-        }
+        if (total > 0) log_error("%s", output);
         return 1;
     }
     return 0;
@@ -1199,7 +1041,7 @@ static void check_stale_pid(void) {
     if (access(PID_FILE, F_OK) == 0) {
         FILE *f = fopen(PID_FILE, "r");
         if (f) {
-            char pbuf[64];
+            char pbuf[32];
             if (fgets(pbuf, sizeof(pbuf), f)) {
                 pid_t old_pid = (pid_t)atoi(pbuf);
                 if (old_pid > 0 && kill(old_pid, 0) != 0) {
@@ -1207,7 +1049,6 @@ static void check_stale_pid(void) {
                     clear_pid();
                 }
             } else {
-                log_info("Invalid PID file content, cleaning up");
                 clear_pid();
             }
             fclose(f);
@@ -1229,7 +1070,7 @@ static int start_service(void) {
         return 1;
     }
 
-    char config_file[1024];
+    char config_file[300];
     snprintf(config_file, sizeof(config_file), "%s/config.json", WORK_DIR);
     if (access(config_file, F_OK) != 0) {
         log_error("config.json not found in %s", WORK_DIR);
@@ -1257,10 +1098,7 @@ static int start_service(void) {
 
     if (pid == 0) {
         setsid();
-
-        if (chdir(WORK_DIR) != 0) {
-            _exit(127);
-        }
+        if (chdir(WORK_DIR) != 0) _exit(127);
 
         struct rlimit rl;
         rl.rlim_cur = NOFILE_LIMIT;
@@ -1280,9 +1118,7 @@ static int start_service(void) {
             if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
         }
 
-        if (g_iana_tz[0] != '\0') {
-            setenv("TZ", g_iana_tz, 1);
-        }
+        if (g_iana_tz[0] != '\0') setenv("TZ", g_iana_tz, 1);
 
         apply_credentials(RUN_USER);
         execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
@@ -1295,8 +1131,7 @@ static int start_service(void) {
         fclose(pf);
     }
 
-    int max_attempts = START_TIMEOUT;
-    if (max_attempts <= 0) max_attempts = 3;
+    int max_attempts = START_TIMEOUT > 0 ? START_TIMEOUT : 3;
     int child_alive = 1;
 
     for (int i = 0; i < max_attempts; i++) {
@@ -1305,25 +1140,17 @@ static int start_service(void) {
         pid_t w = waitpid(pid, &status, WNOHANG);
         if (w == pid) {
             child_alive = 0;
-            if (WIFEXITED(status)) {
-                log_error("%s exited immediately with code %d!", SERVICE_NAME, WEXITSTATUS(status));
-            } else if (WIFSIGNALED(status)) {
-                log_error("%s killed by signal %d!", SERVICE_NAME, WTERMSIG(status));
-            } else {
-                log_error("%s exited immediately after startup!", SERVICE_NAME);
-            }
+            if (WIFEXITED(status)) log_error("%s exited immediately with code %d!", SERVICE_NAME, WEXITSTATUS(status));
+            else if (WIFSIGNALED(status)) log_error("%s killed by signal %d!", SERVICE_NAME, WTERMSIG(status));
+            else log_error("%s exited immediately after startup!", SERVICE_NAME);
             break;
         } else if (w < 0 && errno == ECHILD) {
-            if (kill(pid, 0) != 0) {
-                child_alive = 0;
-                break;
-            }
+            if (kill(pid, 0) != 0) { child_alive = 0; break; }
         }
     }
 
     if (!child_alive || kill(pid, 0) != 0) {
-        log_error("%s failed to start!", SERVICE_NAME);
-        log_error("Check %s for details", SINGBOX_LOG);
+        log_error("%s failed to start! Check %s for details", SERVICE_NAME, SINGBOX_LOG);
         show_tail(SINGBOX_LOG, 10);
         clear_pid();
         return 1;
@@ -1427,27 +1254,17 @@ static int reload_service(void) {
 static void show_log(const char *target, int lines) {
     if (lines <= 0) lines = 50;
 
-    int show_script = 1;
-    int show_error = 1;
-    int show_service = 0;
+    int show_script = 1, show_error = 1, show_service = 0;
 
     if (target != NULL) {
         if (strcmp(target, "all") == 0) {
-            show_script = 1;
-            show_error = 1;
-            show_service = 1;
+            show_script = 1; show_error = 1; show_service = 1;
         } else if (strcmp(target, "sbox") == 0 || strcmp(target, "service") == 0 || strcmp(target, "-s") == 0) {
-            show_script = 0;
-            show_error = 0;
-            show_service = 1;
+            show_script = 0; show_error = 0; show_service = 1;
         } else if (strcmp(target, "error") == 0 || strcmp(target, "-e") == 0) {
-            show_script = 0;
-            show_error = 1;
-            show_service = 0;
+            show_script = 0; show_error = 1; show_service = 0;
         } else if (strcmp(target, "run") == 0 || strcmp(target, "-r") == 0) {
-            show_script = 1;
-            show_error = 0;
-            show_service = 0;
+            show_script = 1; show_error = 0; show_service = 0;
         }
     }
 
@@ -1547,7 +1364,6 @@ int main(int argc, char *argv[]) {
             target = argv[2];
             lines = atoi(argv[3]);
         } else if (argc == 3) {
-            // If argument is a number, treat as lines count
             int is_num = 1;
             for (int i = 0; argv[2][i]; i++) {
                 if (!isdigit((unsigned char)argv[2][i])) {
@@ -1555,11 +1371,8 @@ int main(int argc, char *argv[]) {
                     break;
                 }
             }
-            if (is_num) {
-                lines = atoi(argv[2]);
-            } else {
-                target = argv[2];
-            }
+            if (is_num) lines = atoi(argv[2]);
+            else target = argv[2];
         }
         show_log(target, lines);
         return 0;
