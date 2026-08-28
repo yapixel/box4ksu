@@ -34,13 +34,12 @@ jobs:
 
       - name: Build static binary and package tarball (${{ matrix.arch }})
         run: |
-          # 1. Compile static binary
+          # 1. Compile static binary strictly named 'box'
           zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
           file box
           ls -lh box
-          cp box box-${{ matrix.arch }}
 
-          # 2. Package tarball where internal binary name is strictly 'box' (without './' root entry)
+          # 2. Package tarball where internal files are strictly box, box.ini, box-service.sh
           mkdir -p pkg
           cp box pkg/
           cp box.ini pkg/
@@ -54,9 +53,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: box-${{ matrix.arch }}
-          path: |
-            box-${{ matrix.arch }}
-            box-${{ matrix.arch }}.tar.gz
+          path: box-${{ matrix.arch }}.tar.gz
 
   release:
     needs: build
@@ -74,7 +71,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "box-*" \) -exec cp {} release-assets/ \;
+          find artifacts -type f -name "*.tar.gz" -exec cp {} release-assets/ \;
           cd release-assets
           sha256sum * > sha256sums.txt
           ls -la
