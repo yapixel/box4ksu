@@ -299,48 +299,57 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
 static long g_tz_offset_sec = 28800; // Default +8 hours (CST UTC+8)
 static char g_iana_tz[128] = "Asia/Shanghai";
 
-// 修复：改进 Android 属性获取函数
 static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
     if (!prop_name || !out_val || out_len == 0) return -1;
-    
-    char cmd[256];
-    FILE *p = NULL;
-    int ret = -1;
-    
-    // 方法1: 尝试直接调用 getprop（如果它在 PATH 中）
-    snprintf(cmd, sizeof(cmd), "getprop %s 2>/dev/null", prop_name);
-    p = popen(cmd, "r");
-    
-    // 方法2: 如果方法1失败，尝试完整路径
-    if (!p) {
-        snprintf(cmd, sizeof(cmd), "/system/bin/getprop %s 2>/dev/null", prop_name);
-        p = popen(cmd, "r");
+    out_val[0] = '\0';
+
+    int pipe_fd[2];
+    if (pipe(pipe_fd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        return -1;
     }
-    
-    // 方法3: 尝试 /vendor/bin/getprop（某些设备）
-    if (!p) {
-        snprintf(cmd, sizeof(cmd), "/vendor/bin/getprop %s 2>/dev/null", prop_name);
-        p = popen(cmd, "r");
-    }
-    
-    if (!p) return -1;
-    
-    // 读取属性值
-    if (fgets(out_val, out_len, p) != NULL) {
-        // 去除末尾的换行符、回车符和空格
-        size_t len = strlen(out_val);
-        while (len > 0 && (out_val[len-1] == '\n' || out_val[len-1] == '\r' || 
-                          out_val[len-1] == ' ' || out_val[len-1] == '\t')) {
-            out_val[--len] = '\0';
+
+    if (pid == 0) {
+        close(pipe_fd[0]);
+        if (dup2(pipe_fd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipe_fd[1]);
+
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDERR_FILENO);
+            close(null_fd);
         }
-        // 如果属性值不为空，返回成功
-        if (len > 0) {
-            ret = 0;
+
+        execl("/system/bin/getprop", "getprop", prop_name, (char *)NULL);
+        execl("/vendor/bin/getprop", "getprop", prop_name, (char *)NULL);
+        execlp("getprop", "getprop", prop_name, (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipe_fd[1]);
+    size_t len = 0;
+    while (len < out_len - 1) {
+        ssize_t n = read(pipe_fd[0], out_val + len, out_len - 1 - len);
+        if (n > 0) {
+            len += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
         }
     }
-    
-    pclose(p);
-    return ret;
+    close(pipe_fd[0]);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+
+    out_val[len] = '\0';
+    while (len > 0 && isspace((unsigned char)out_val[len - 1])) {
+        out_val[--len] = '\0';
+    }
+    return len > 0 ? 0 : -1;
 }
 
 static long parse_offset_string(const char *s) {
