@@ -1,18 +1,19 @@
-# sing-box KernelSU 服务管理脚本
+# sing-box KernelSU 服务管理程序
 
-这是一个用于 KernelSU 环境的 sing-box 服务管理脚本，提供完整的服务生命周期管理和状态监控功能。
+这是一个专为 KernelSU / APatch / Magisk 环境设计的 sing-box 原生服务管理程序，提供完整的服务生命周期管理和状态监控功能。
 
 ## 📋 特性
 
 - ✅ 完整的服务管理（启动/停止/重启/热重载/状态）
-- ✅ 详细的状态监控（内存/CPU/运行时间/网络连接/磁盘IO，纯C系统调用实现）
+- ✅ 详细的状态监控（内存/CPU/运行时间/网络连接/磁盘IO，纯 C 系统调用实现）
 - ✅ 高性能架构（原生 C 语言 `fork`/`exec` 实现，零 Shell 管道开销）
 - ✅ 配置文件校验与热重载（SIGHUP）
 - ✅ 日志轮转管理与多目标日志查看
-- ✅ 开机自启支持
+- ✅ 开机自启支持（等待系统启动完成保证网络就绪）
 - ✅ 进程锁防止重复操作
 - ✅ 自动创建工作目录
-- ✅ 独立日志系统（脚本日志与 sing-box 日志分离）
+- ✅ 独立日志系统（管理日志与 sing-box 核心日志分离）
+- ✅ 智能时区自适应（自动跟随 Android 系统时区）
 
 ## 📂 目录结构
 
@@ -21,8 +22,7 @@
 ├── service.d/
 │   └── sing-box.sh              # 开机自启脚本
 └── sing-box/                    # 工作目录
-    ├── box                      # 原生 C 管理程序（推荐）
-    ├── box.sh                   # Shell 管理脚本
+    ├── box                      # 原生 C 管理程序
     ├── box.ini                  # 服务配置文件
     ├── config.json              # sing-box 配置文件
     ├── bin/
@@ -37,12 +37,9 @@
 
 ## 🚀 快速开始
 
-### 1. 编译与部署
+### 1. 部署与权限
 
 ```bash
-# 编译原生二进制 (静态链接 aarch64 musl)
-make
-
 # 创建工作目录
 mkdir -p /data/adb/sing-box/{bin,logs}
 
@@ -76,6 +73,7 @@ chown -R root:root /data/adb/sing-box
 ### 3. 安装开机自启（可选）
 
 ```bash
+mkdir -p /data/adb/service.d
 cat > /data/adb/service.d/sing-box.sh << 'EOF'
 #!/system/bin/sh
 until [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; do
@@ -85,8 +83,6 @@ sleep 3
 rm -rf /data/adb/sing-box/.box.lock
 if [ -x /data/adb/sing-box/box ]; then
     /data/adb/sing-box/box start
-elif [ -x /data/adb/sing-box/box.sh ]; then
-    /data/adb/sing-box/box.sh start
 fi
 EOF
 chmod 755 /data/adb/service.d/sing-box.sh
@@ -137,13 +133,13 @@ chmod 755 /data/adb/service.d/sing-box.sh
 ### 查看日志
 
 ```bash
-# 查看脚本操作日志
+# 查看管理操作日志
 tail -f /data/adb/sing-box/logs/run.log
 
-# 查看脚本错误日志
+# 查看管理错误日志
 tail -f /data/adb/sing-box/logs/run_error.log
 
-# 查看 sing-box 运行日志
+# 查看 sing-box 核心运行日志
 tail -f /data/adb/sing-box/logs/sing-box.log
 ```
 
@@ -154,30 +150,30 @@ tail -f /data/adb/sing-box/logs/sing-box.log
 | 项目 | 说明 | 数据来源 |
 |------|------|----------|
 | PID | 进程ID | `/proc/[pid]/` |
-| 内存占用 | VmRSS 内存使用量 | `/proc/[pid]/status` |
-| CPU 占用 | 进程CPU使用率 | `ps -p [pid] -o %CPU` |
+| 时区 | 当前运行时区及偏移 | Android 系统属性 / `box.ini` |
+| 内存占用 | VmRSS 实际物理内存占用 | `/proc/[pid]/status` |
+| CPU 占用 | 进程平均 CPU 使用率 | `/proc/[pid]/stat` |
 | 运行时间 | 进程运行时长 | `/proc/[pid]/stat` |
-| 网络套接字 | 打开的socket数量 | `/proc/[pid]/fd` |
+| 网络套接字 | 打开的 socket 数量 | `/proc/[pid]/fd` |
 | 磁盘IO | 累计读写量 | `/proc/[pid]/io` |
 
 ### 状态输出示例
 
-```
-[2026-01-01 10:00:00] [INFO] sing-box service is running (PID: 12345)
-[2026-01-01 10:00:00] [INFO] Memory usage: 42.50 MB
-[2026-01-01 10:00:00] [INFO] CPU usage: 0.5%
-[2026-01-01 10:00:00] [INFO] Uptime: 2h 30m 15s
-[2026-01-01 10:00:00] [INFO] Network sockets: 12
-[2026-01-01 10:00:00] [INFO] Disk I/O: read 15.20 MB / write 3.80 MB
+```text
+[2026-08-28 08:30:00] [INFO] sing-box service is running (PID: 12345)
+[2026-08-28 08:30:00] [INFO] Timezone: Asia/Shanghai (UTC+08:00)
+[2026-08-28 08:30:00] [INFO] Memory usage: 42.50 MB
+[2026-08-28 08:30:00] [INFO] CPU usage: 0.5% (avg)
+[2026-08-28 08:30:00] [INFO] Uptime: 2h 30m 15s
+[2026-08-28 08:30:00] [INFO] Network sockets: 12
+[2026-08-28 08:30:00] [INFO] Disk I/O: read 15.20 MB / write 3.80 MB
 ```
 
 ## ⚙️ 配置说明
 
-### 脚本配置项
+编辑 `/data/adb/sing-box/box.ini`：
 
-编辑 `box.sh` 开头的配置区：
-
-```bash
+```ini
 SERVICE_NAME="sing-box"          # 服务名称
 WORK_DIR="/data/adb/sing-box"    # 工作目录
 RUN_USER="root:net_admin"        # 运行用户:组
@@ -221,9 +217,9 @@ NOFILE_LIMIT=1000000             # 文件描述符限制
    tail -50 /data/adb/sing-box/logs/sing-box.log
    ```
 
-4. 查看脚本错误日志：
+4. 查看管理程序日志：
    ```bash
-   /data/adb/sing-box/box.sh log
+   /data/adb/sing-box/box log
    ```
 
 5. 手动运行测试：
@@ -244,14 +240,12 @@ NOFILE_LIMIT=1000000             # 文件描述符限制
    chmod 755 /data/adb/service.d/sing-box.sh
    ```
 
-3. 检查 KernelSU 版本是否支持 service.d
-
 ### 权限问题
 
 确保所有文件属主为 root：
 ```bash
 chown -R root:root /data/adb/sing-box
-chmod 755 /data/adb/sing-box/box.sh
+chmod 755 /data/adb/sing-box/box
 chmod 755 /data/adb/sing-box/bin/sing-box
 ```
 
@@ -275,7 +269,7 @@ tar -czf /sdcard/sing-box-backup-$(date +%Y%m%d).tar.gz \
 
 ```bash
 # 停止服务
-/data/adb/sing-box/box.sh stop
+/data/adb/sing-box/box stop
 
 # 恢复备份
 tar -xzf /sdcard/sing-box-backup.tar.gz -C /data/adb
@@ -283,19 +277,18 @@ tar -xzf /sdcard/sing-box-backup.tar.gz -C /data/adb
 # 恢复权限
 chown -R root:root /data/adb/sing-box
 chmod 755 /data/adb/sing-box/bin/sing-box
-chmod 755 /data/adb/sing-box/box.sh
+chmod 755 /data/adb/sing-box/box
 
 # 启动服务
-/data/adb/sing-box/box.sh start
+/data/adb/sing-box/box start
 ```
 
 ## 📝 注意事项
 
-1. **需要 root 权限**：脚本需要在 root 环境下运行
-2. **依赖 busybox**：KernelSU 环境必须包含 busybox
-3. **配置文件位置**：`config.json` 必须放在 `WORK_DIR` 根目录
-4. **日志分离**：脚本日志和 sing-box 日志是独立的文件
-5. **开机自启**：如需开机自启，必须安装 service.d 脚本
+1. **需要 root 权限**：程序需要在 root 环境下运行
+2. **配置文件位置**：`config.json` 必须放在 `WORK_DIR` 根目录
+3. **日志分离**：管理日志和 sing-box 日志是独立的文件
+4. **开机自启**：如需开机自启，必须安装 service.d 脚本
 
 ## 🙏 致谢
 

@@ -24,6 +24,4 @@ rm -rf /data/adb/sing-box/.box.lock
 # 5. Start service
 if [ -x /data/adb/sing-box/box ]; then
     /data/adb/sing-box/box start
-elif [ -x /data/adb/sing-box/box.sh ]; then
-    /data/adb/sing-box/box.sh start
 fi
