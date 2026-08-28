@@ -300,7 +300,7 @@ static long g_tz_offset_sec = 28800; // Default +8 hours (CST UTC+8)
 static char g_iana_tz[128] = "Asia/Shanghai";
 
 static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
-    if (!prop_name || prop_name[0] == '\0' || !out_val || out_len == 0) return -1;
+    if (!prop_name || !out_val || out_len == 0) return -1;
     out_val[0] = '\0';
 
     int pipe_fd[2];
@@ -324,10 +324,12 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
         close(pipe_fd[1]);
 
         char *const argv1[] = {"/system/bin/getprop", (char *)prop_name, NULL};
-        char *const argv2[] = {"getprop", (char *)prop_name, NULL};
+        char *const argv2[] = {"/vendor/bin/getprop", (char *)prop_name, NULL};
+        char *const argv3[] = {"getprop", (char *)prop_name, NULL};
 
         execv("/system/bin/getprop", argv1);
-        execvp("getprop", argv2);
+        execv("/vendor/bin/getprop", argv2);
+        execvp("getprop", argv3);
         _exit(127);
     }
 
@@ -355,68 +357,6 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     }
 
     if (p[0] != '\0') {
-        snprintf(out_val, out_len, "%s", p);
-        return 0;
-    }
-    return -1;
-}
-
-static int get_android_date_z(char *out_val, size_t out_len) {
-    if (!out_val || out_len == 0) return -1;
-    out_val[0] = '\0';
-
-    int pipe_fd[2];
-    if (pipe(pipe_fd) != 0) return -1;
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipe_fd[0]);
-        close(pipe_fd[1]);
-        return -1;
-    }
-
-    if (pid == 0) {
-        close(pipe_fd[0]);
-        dup2(pipe_fd[1], STDOUT_FILENO);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        close(pipe_fd[1]);
-
-        char *const argv1[] = {"/system/bin/date", "+%z", NULL};
-        char *const argv2[] = {"date", "+%z", NULL};
-
-        execv("/system/bin/date", argv1);
-        execvp("date", argv2);
-        _exit(127);
-    }
-
-    close(pipe_fd[1]);
-
-    ssize_t total = 0;
-    char buf[64];
-    while (total < (ssize_t)sizeof(buf) - 1) {
-        ssize_t n = read(pipe_fd[0], buf + total, sizeof(buf) - 1 - total);
-        if (n <= 0) break;
-        total += n;
-    }
-    buf[total] = '\0';
-    close(pipe_fd[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-
-    char *p = buf;
-    while (isspace((unsigned char)*p)) p++;
-    char *end = p + strlen(p) - 1;
-    while (end >= p && isspace((unsigned char)*end)) {
-        *end = '\0';
-        end--;
-    }
-
-    if (p[0] == '+' || p[0] == '-') {
         snprintf(out_val, out_len, "%s", p);
         return 0;
     }
@@ -515,6 +455,8 @@ static long get_tz_offset_from_name(const char *tz_name) {
 }
 
 static void init_timezone(const char *custom_tz) {
+    char tz_buf[128] = {0};
+    
     if (custom_tz && custom_tz[0] != '\0' && strcasecmp(custom_tz, "auto") != 0) {
         snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", custom_tz);
     } else {
@@ -523,29 +465,38 @@ static void init_timezone(const char *custom_tz) {
             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
         } else {
             char prop_tz[64] = {0};
+            
             if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            } else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+            }
+            else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            } else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+            }
+            else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            } else {
+            }
+            else {
+                FILE *tz_file = fopen("/etc/timezone", "r");
+                if (tz_file) {
+                    if (fgets(tz_buf, sizeof(tz_buf), tz_file)) {
+                        char *newline = strchr(tz_buf, '\n');
+                        if (newline) *newline = '\0';
+                        if (tz_buf[0] != '\0') {
+                            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", tz_buf);
+                        }
+                    }
+                    fclose(tz_file);
+                }
+            }
+            
+            if (g_iana_tz[0] == '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
             }
         }
     }
 
     g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
-
-    if (g_tz_offset_sec == 0 && strcasecmp(g_iana_tz, "UTC") != 0 && strcasecmp(g_iana_tz, "GMT") != 0) {
-        char date_z[32] = {0};
-        if (get_android_date_z(date_z, sizeof(date_z)) == 0) {
-            g_tz_offset_sec = parse_offset_string(date_z);
-        } else {
-            g_tz_offset_sec = 28800;
-        }
-    }
-
+    
     setenv("TZ", g_iana_tz, 1);
     tzset();
 }
