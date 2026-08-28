@@ -178,10 +178,6 @@
   ],
   "outbounds": [
     {
-      "tag": "bridge-out",
-      "type": "bridge"
-    },
-    {
       "tag": "direct",
       "type": "direct"
     },
