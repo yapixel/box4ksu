@@ -32,7 +32,7 @@ jobs:
           curl -sSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | tar -xJ -C /tmp
           echo "/tmp/zig-linux-x86_64-${ZIG_VER}" >> $GITHUB_PATH
 
-      - name: Build static binary and package archives (${{ matrix.arch }})
+      - name: Build static binary and package tarball (${{ matrix.arch }})
         run: |
           # 1. Compile static binary
           zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
@@ -40,15 +40,14 @@ jobs:
           ls -lh box
           cp box box-${{ matrix.arch }}
 
-          # 2. Package archive where internal executable name is strictly 'box'
+          # 2. Package tarball where internal binary name is strictly 'box' (without './' root entry)
           mkdir -p pkg
           cp box pkg/
           cp box.ini pkg/
           cp box-service.sh pkg/
           chmod 755 pkg/box pkg/box-service.sh
 
-          tar -czf box-${{ matrix.arch }}.tar.gz -C pkg .
-          zip -j box-${{ matrix.arch }}.zip pkg/*
+          (cd pkg && tar -czf ../box-${{ matrix.arch }}.tar.gz box box.ini box-service.sh)
           rm -rf pkg
 
       - name: Upload build artifact (${{ matrix.arch }})
@@ -58,7 +57,6 @@ jobs:
           path: |
             box-${{ matrix.arch }}
             box-${{ matrix.arch }}.tar.gz
-            box-${{ matrix.arch }}.zip
 
   release:
     needs: build
@@ -77,8 +75,6 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -type f \( -name "box-*" \) -exec cp {} release-assets/ \;
-          cp box.ini release-assets/
-          cp box-service.sh release-assets/
           cd release-assets
           sha256sum * > sha256sums.txt
           ls -la
