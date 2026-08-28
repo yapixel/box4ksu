@@ -120,6 +120,16 @@
       },
       {
         "rule_set": [
+          "geosite/openai",
+          "geosite/anthropic",
+          "geosite/google",
+          "geosite/google-cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "rule_set": [
           "geosite/alibaba",
           "geosite/category-games@cn",
           "geosite/apple-cn",
