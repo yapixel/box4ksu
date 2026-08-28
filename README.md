@@ -78,10 +78,15 @@ chown -R root:root /data/adb/sing-box
 ```bash
 cat > /data/adb/service.d/sing-box.sh << 'EOF'
 #!/system/bin/sh
+until [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; do
+    sleep 3
+done
+sleep 3
+rm -rf /data/adb/sing-box/.box.lock
 if [ -x /data/adb/sing-box/box ]; then
     /data/adb/sing-box/box start
 elif [ -x /data/adb/sing-box/box.sh ]; then
-    /data/adb/sing-box/box.sh start &
+    /data/adb/sing-box/box.sh start
 fi
 EOF
 chmod 755 /data/adb/service.d/sing-box.sh

@@ -315,41 +315,52 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
 
     if (pid == 0) {
         close(pipe_fd[0]);
-        if (dup2(pipe_fd[1], STDOUT_FILENO) < 0) _exit(127);
+        dup2(pipe_fd[1], STDOUT_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
         close(pipe_fd[1]);
 
-        int null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) {
-            dup2(null_fd, STDERR_FILENO);
-            close(null_fd);
-        }
+        char *const argv1[] = {"/system/bin/getprop", (char *)prop_name, NULL};
+        char *const argv2[] = {"/vendor/bin/getprop", (char *)prop_name, NULL};
+        char *const argv3[] = {"getprop", (char *)prop_name, NULL};
 
-        execl("/system/bin/getprop", "getprop", prop_name, (char *)NULL);
-        execl("/vendor/bin/getprop", "getprop", prop_name, (char *)NULL);
-        execlp("getprop", "getprop", prop_name, (char *)NULL);
+        execv("/system/bin/getprop", argv1);
+        execv("/vendor/bin/getprop", argv2);
+        execvp("getprop", argv3);
         _exit(127);
     }
 
     close(pipe_fd[1]);
-    size_t len = 0;
-    while (len < out_len - 1) {
-        ssize_t n = read(pipe_fd[0], out_val + len, out_len - 1 - len);
-        if (n > 0) {
-            len += (size_t)n;
-        } else if (n < 0 && errno == EINTR) {
-            continue;
-        } else {
-            break;
-        }
-    }
-    close(pipe_fd[0]);
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 
-    out_val[len] = '\0';
-    while (len > 0 && isspace((unsigned char)out_val[len - 1])) {
-        out_val[--len] = '\0';
+    ssize_t total = 0;
+    char buf[256];
+    while (total < (ssize_t)sizeof(buf) - 1) {
+        ssize_t n = read(pipe_fd[0], buf + total, sizeof(buf) - 1 - total);
+        if (n <= 0) break;
+        total += n;
     }
-    return len > 0 ? 0 : -1;
+    buf[total] = '\0';
+    close(pipe_fd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    char *p = buf;
+    while (isspace((unsigned char)*p) || *p == '[' || *p == '"' || *p == '\'') p++;
+    char *end = p + strlen(p) - 1;
+    while (end >= p && (isspace((unsigned char)*end) || *end == ']' || *end == '"' || *end == '\'')) {
+        *end = '\0';
+        end--;
+    }
+
+    if (p[0] != '\0') {
+        snprintf(out_val, out_len, "%s", p);
+        return 0;
+    }
+    return -1;
 }
 
 static long parse_offset_string(const char *s) {
@@ -389,6 +400,7 @@ static long get_tz_offset_from_name(const char *tz_name) {
         strcasecmp(tz_name, "Asia/Chongqing") == 0 ||
         strcasecmp(tz_name, "Asia/Harbin") == 0 ||
         strcasecmp(tz_name, "Asia/Urumqi") == 0 ||
+        strcasecmp(tz_name, "Asia/Kashgar") == 0 ||
         strcasecmp(tz_name, "Asia/Hong_Kong") == 0 ||
         strcasecmp(tz_name, "Asia/Macau") == 0 ||
         strcasecmp(tz_name, "Asia/Taipei") == 0 ||
@@ -396,43 +408,63 @@ static long get_tz_offset_from_name(const char *tz_name) {
         strcasecmp(tz_name, "Asia/Kuala_Lumpur") == 0 ||
         strcasecmp(tz_name, "Asia/Manila") == 0 ||
         strcasecmp(tz_name, "Asia/Perth") == 0 ||
+        strcasecmp(tz_name, "Asia/Brunei") == 0 ||
+        strcasecmp(tz_name, "Asia/Makassar") == 0 ||
+        strcasecmp(tz_name, "Asia/Jayapura") == 0 ||
         strcasecmp(tz_name, "PRC") == 0 ||
-        strcasecmp(tz_name, "CST") == 0) {
+        strcasecmp(tz_name, "China") == 0 ||
+        strcasecmp(tz_name, "CST") == 0 ||
+        strcasecmp(tz_name, "CST-8") == 0 ||
+        strcasecmp(tz_name, "Etc/GMT-8") == 0) {
         return 28800;
     }
     if (strcasecmp(tz_name, "Asia/Tokyo") == 0 ||
         strcasecmp(tz_name, "Asia/Seoul") == 0 ||
+        strcasecmp(tz_name, "Asia/Pyongyang") == 0 ||
         strcasecmp(tz_name, "JST") == 0 ||
-        strcasecmp(tz_name, "KST") == 0) {
+        strcasecmp(tz_name, "KST") == 0 ||
+        strcasecmp(tz_name, "Etc/GMT-9") == 0) {
         return 32400;
     }
     if (strcasecmp(tz_name, "Asia/Bangkok") == 0 ||
         strcasecmp(tz_name, "Asia/Jakarta") == 0 ||
-        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0) {
+        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0 ||
+        strcasecmp(tz_name, "Asia/Phnom_Penh") == 0 ||
+        strcasecmp(tz_name, "Asia/Vientiane") == 0 ||
+        strcasecmp(tz_name, "Etc/GMT-7") == 0) {
         return 25200;
     }
-    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0) {
+    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0 || strcasecmp(tz_name, "Asia/Colombo") == 0 || strcasecmp(tz_name, "IST") == 0) {
         return 19800;
     }
-    if (strcasecmp(tz_name, "Asia/Dubai") == 0) {
+    if (strcasecmp(tz_name, "Asia/Dubai") == 0 || strcasecmp(tz_name, "Asia/Muscat") == 0 || strcasecmp(tz_name, "GST") == 0) {
         return 14400;
     }
-    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 || strcasecmp(tz_name, "GMT") == 0) {
+    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 || strcasecmp(tz_name, "GMT") == 0 || strcasecmp(tz_name, "Universal") == 0 || strcasecmp(tz_name, "Zulu") == 0 || strcasecmp(tz_name, "Etc/UTC") == 0 || strcasecmp(tz_name, "Etc/GMT") == 0) {
         return 0;
     }
     if (strcasecmp(tz_name, "Europe/Berlin") == 0 ||
         strcasecmp(tz_name, "Europe/Paris") == 0 ||
         strcasecmp(tz_name, "Europe/Rome") == 0 ||
-        strcasecmp(tz_name, "Europe/Madrid") == 0) {
+        strcasecmp(tz_name, "Europe/Madrid") == 0 ||
+        strcasecmp(tz_name, "Europe/Amsterdam") == 0 ||
+        strcasecmp(tz_name, "Europe/Brussels") == 0 ||
+        strcasecmp(tz_name, "Europe/Vienna") == 0 ||
+        strcasecmp(tz_name, "Europe/Warsaw") == 0 ||
+        strcasecmp(tz_name, "CET") == 0 ||
+        strcasecmp(tz_name, "Etc/GMT-1") == 0) {
         return 3600;
     }
-    if (strcasecmp(tz_name, "America/New_York") == 0) {
+    if (strcasecmp(tz_name, "America/New_York") == 0 || strcasecmp(tz_name, "EST") == 0 || strcasecmp(tz_name, "America/Detroit") == 0 || strcasecmp(tz_name, "America/Toronto") == 0) {
         return -18000;
     }
-    if (strcasecmp(tz_name, "America/Chicago") == 0) {
+    if (strcasecmp(tz_name, "America/Chicago") == 0 || strcasecmp(tz_name, "America/Winnipeg") == 0) {
         return -21600;
     }
-    if (strcasecmp(tz_name, "America/Los_Angeles") == 0) {
+    if (strcasecmp(tz_name, "America/Denver") == 0 || strcasecmp(tz_name, "MST") == 0) {
+        return -25200;
+    }
+    if (strcasecmp(tz_name, "America/Los_Angeles") == 0 || strcasecmp(tz_name, "PST") == 0 || strcasecmp(tz_name, "America/Vancouver") == 0) {
         return -28800;
     }
 
@@ -443,7 +475,6 @@ static long get_tz_offset_from_name(const char *tz_name) {
     return 28800;
 }
 
-// 修复：改进时区初始化函数，添加调试日志
 static void init_timezone(const char *custom_tz) {
     char tz_buf[128] = {0};
     
@@ -454,21 +485,17 @@ static void init_timezone(const char *custom_tz) {
         if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0 && strchr(env_tz, '/')) {
             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
         } else {
-            // 尝试从 Android 系统属性获取时区
             char prop_tz[64] = {0};
             
-            // 优先使用 persist.sys.timezone（用户设置的时区）
             if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-                // 调试日志（生产环境可注释掉）
-                // printf("[DEBUG] Timezone from persist.sys.timezone: %s\n", g_iana_tz);
             }
-            // 如果失败，尝试 ro.sys.timezone（系统默认时区）
             else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-                // printf("[DEBUG] Timezone from ro.sys.timezone: %s\n", g_iana_tz);
             }
-            // 如果都失败，尝试从 /etc/timezone 读取（部分设备）
+            else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+            }
             else {
                 FILE *tz_file = fopen("/etc/timezone", "r");
                 if (tz_file) {
@@ -477,25 +504,20 @@ static void init_timezone(const char *custom_tz) {
                         if (newline) *newline = '\0';
                         if (tz_buf[0] != '\0') {
                             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", tz_buf);
-                            // printf("[DEBUG] Timezone from /etc/timezone: %s\n", g_iana_tz);
                         }
                     }
                     fclose(tz_file);
                 }
             }
             
-            // 如果所有方法都失败，使用默认时区
             if (g_iana_tz[0] == '\0') {
-                // printf("[DEBUG] No timezone found, using default Asia/Shanghai\n");
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
             }
         }
     }
 
-    // 计算时区偏移
     g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
     
-    // 设置环境变量
     setenv("TZ", g_iana_tz, 1);
     tzset();
 }
@@ -520,10 +542,10 @@ static void load_config(void) {
     snprintf(self_ini, sizeof(self_ini), "%.500s/box.ini", self_dir);
 
     const char *candidates[] = {
-        "box.ini",
-        self_ini,
         "/data/adb/sing-box/box.ini",
         "/data/adb/box.ini",
+        self_ini,
+        "box.ini",
         NULL
     };
 
@@ -539,13 +561,23 @@ static void load_config(void) {
         }
     }
 
-    if (!has_workdir) {
-        if (self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
+    if (!has_workdir || g_cfg.work_dir[0] == '\0') {
+        int is_sys_bin = (strcmp(self_dir, "/system/bin") == 0 ||
+                          strcmp(self_dir, "/system/xbin") == 0 ||
+                          strcmp(self_dir, "/sbin") == 0 ||
+                          strcmp(self_dir, "/bin") == 0 ||
+                          strcmp(self_dir, "/usr/bin") == 0 ||
+                          strstr(self_dir, "/ksu/bin") != NULL ||
+                          strstr(self_dir, "/ap/bin") != NULL ||
+                          strstr(self_dir, "/magisk") != NULL);
+
+        if (!is_sys_bin && self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
             snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.511s", self_dir);
         } else {
             snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%.127s", g_cfg.service_name);
         }
     }
+
     if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.350s/bin/%.127s", g_cfg.work_dir, g_cfg.service_name);
     if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.350s/%.127s.pid", g_cfg.work_dir, g_cfg.service_name);
     if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.450s/logs", g_cfg.work_dir);
@@ -743,11 +775,26 @@ static int is_lock_stale(void) {
         if (fgets(pbuf, sizeof(pbuf), f)) {
             pid_t lock_pid = (pid_t)atoi(pbuf);
             fclose(f);
-            if (lock_pid > 0 && lock_pid != getpid()) {
-                if (kill(lock_pid, 0) != 0 && errno == ESRCH) {
-                    return 1;
+            if (lock_pid > 0) {
+                if (lock_pid == getpid()) return 0;
+                if (kill(lock_pid, 0) != 0 && errno == ESRCH) return 1;
+
+                char comm_path[256];
+                snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", lock_pid);
+                FILE *cf = fopen(comm_path, "r");
+                if (cf) {
+                    char comm[64] = {0};
+                    if (fgets(comm, sizeof(comm), cf)) {
+                        comm[strcspn(comm, "\r\n")] = 0;
+                        fclose(cf);
+                        if (strstr(comm, "box") != NULL) {
+                            return 0;
+                        }
+                    } else {
+                        fclose(cf);
+                    }
                 }
-                return 0;
+                return 1;
             }
         } else {
             fclose(f);
@@ -756,9 +803,9 @@ static int is_lock_stale(void) {
     struct stat st;
     if (stat(LOCK_DIR, &st) == 0) {
         time_t now = time(NULL);
-        if ((now - st.st_mtime) > 60) return 1;
+        if (st.st_mtime > 0 && now > st.st_mtime && (now - st.st_mtime) > 60) return 1;
     }
-    return 0;
+    return 1;
 }
 
 static void signal_lock_cleanup(int sig) {
@@ -965,7 +1012,6 @@ static int display_status(void) {
         }
     }
 
-    // 2. Uptime & CPU usage calculated directly from /proc/<pid>/stat and clock_gettime
     long long sys_uptime_sec = 0;
     struct timespec bts;
     if (clock_gettime(CLOCK_BOOTTIME, &bts) == 0) {
