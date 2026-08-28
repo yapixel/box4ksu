@@ -296,155 +296,13 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
     }
 }
 
-static uint32_t read_be32(const unsigned char *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static int parse_tzif_footer(const unsigned char *data, size_t len, char *out_tz, size_t out_len) {
-    if (len < 10 || data[len - 1] != '\n') return -1;
-    long p = (long)len - 2;
-    while (p >= 0 && data[p] != '\n') {
-        p--;
-    }
-    if (p < 0) return -1;
-    size_t tz_str_len = (len - 1) - (p + 1);
-    if (tz_str_len == 0 || tz_str_len >= out_len) return -1;
-    memcpy(out_tz, data + p + 1, tz_str_len);
-    out_tz[tz_str_len] = '\0';
-    return 0;
-}
-
-static int parse_tzif_v1_fallback(const unsigned char *data, size_t len, time_t now, char *out_tz, size_t out_len) {
-    if (len < 44 || memcmp(data, "TZif", 4) != 0) return -1;
-    uint32_t timecnt = read_be32(data + 32);
-    uint32_t typecnt = read_be32(data + 36);
-    if (typecnt == 0) return -1;
-
-    size_t times_off = 44;
-    size_t types_off = times_off + timecnt * 4;
-    size_t ttinfo_off = types_off + timecnt;
-    if (ttinfo_off + typecnt * 6 > len) return -1;
-
-    int type_idx = 0;
-    if (timecnt > 0) {
-        int found = 0;
-        for (int i = (int)timecnt - 1; i >= 0; i--) {
-            int32_t t = (int32_t)read_be32(data + times_off + i * 4);
-            if ((int64_t)now >= (int64_t)t) {
-                type_idx = data[types_off + i];
-                found = 1;
-                break;
-            }
-        }
-        if (!found) type_idx = data[types_off];
-    }
-    if ((uint32_t)type_idx >= typecnt) type_idx = 0;
-
-    int32_t gmtoff = (int32_t)read_be32(data + ttinfo_off + type_idx * 6);
-    int total_mins = gmtoff / 60;
-    int hours = abs(total_mins / 60);
-    int mins = abs(total_mins % 60);
-    char sign = (gmtoff >= 0) ? '-' : '+';
-    if (mins != 0) {
-        snprintf(out_tz, out_len, "UTC%c%d:%02d", sign, hours, mins);
-    } else {
-        snprintf(out_tz, out_len, "UTC%c%d", sign, hours);
-    }
-    return 0;
-}
-
-static int get_posix_tz_from_android_tzdata(const char *tz_name, char *out_tz, size_t out_len) {
-    if (!tz_name || tz_name[0] == '\0') return -1;
-
-    const char *tzdata_paths[] = {
-        "/apex/com.android.tzdata/etc/tz/tzdata",
-        "/system/usr/share/zoneinfo/tzdata",
-        "/apex/com.android.runtime/etc/tz/tzdata",
-        "/data/misc/zoneinfo/tzdata",
-        NULL
-    };
-
-    for (int p = 0; tzdata_paths[p] != NULL; p++) {
-        FILE *f = fopen(tzdata_paths[p], "rb");
-        if (!f) continue;
-
-        unsigned char header[24];
-        if (fread(header, 1, 24, f) != 24 || memcmp(header, "tzdata", 6) != 0) {
-            fclose(f);
-            continue;
-        }
-
-        uint32_t idx_off = read_be32(header + 12);
-        uint32_t data_off = read_be32(header + 16);
-
-        if (fseek(f, idx_off, SEEK_SET) != 0) {
-            fclose(f);
-            continue;
-        }
-
-        unsigned char entry[52];
-        int found = 0;
-        uint32_t tz_offset = 0, tz_len = 0;
-
-        while (ftell(f) + 52 <= (long)data_off) {
-            if (fread(entry, 1, 52, f) != 52) break;
-            char name[41];
-            memcpy(name, entry, 40);
-            name[40] = '\0';
-            if (strcmp(name, tz_name) == 0) {
-                tz_offset = read_be32(entry + 40);
-                tz_len = read_be32(entry + 44);
-                found = 1;
-                break;
-            }
-        }
-
-        if (!found || tz_len < 10) {
-            fclose(f);
-            continue;
-        }
-
-        if (fseek(f, data_off + tz_offset, SEEK_SET) != 0) {
-            fclose(f);
-            continue;
-        }
-
-        unsigned char *tz_buf = malloc(tz_len);
-        if (!tz_buf) {
-            fclose(f);
-            continue;
-        }
-
-        if (fread(tz_buf, 1, tz_len, f) != tz_len) {
-            free(tz_buf);
-            fclose(f);
-            continue;
-        }
-        fclose(f);
-
-        if (memcmp(tz_buf, "TZif", 4) == 0) {
-            if (parse_tzif_footer(tz_buf, tz_len, out_tz, out_len) == 0 && out_tz[0] != '\0') {
-                free(tz_buf);
-                return 0;
-            }
-            if (parse_tzif_v1_fallback(tz_buf, tz_len, time(NULL), out_tz, out_len) == 0) {
-                free(tz_buf);
-                return 0;
-            }
-        }
-        free(tz_buf);
-    }
-    return -1;
-}
+static long g_tz_offset_sec = 28800; // Default +8 hours (CST UTC+8)
+static char g_iana_tz[128] = "Asia/Shanghai";
 
 static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
     char cmd[128];
-    snprintf(cmd, sizeof(cmd), "/system/bin/getprop %s", prop_name);
+    snprintf(cmd, sizeof(cmd), "/system/bin/getprop %s 2>/dev/null || getprop %s 2>/dev/null", prop_name, prop_name);
     FILE *p = popen(cmd, "r");
-    if (!p) {
-        snprintf(cmd, sizeof(cmd), "getprop %s", prop_name);
-        p = popen(cmd, "r");
-    }
     if (!p) return -1;
 
     if (fgets(out_val, out_len, p) != NULL) {
@@ -460,9 +318,8 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     return -1;
 }
 
-static int convert_offset_to_posix(const char *offset_str, char *out_tz, size_t out_len) {
-    if (!offset_str || offset_str[0] == '\0') return -1;
-    const char *s = offset_str;
+static long parse_offset_string(const char *s) {
+    if (!s || s[0] == '\0') return 0;
     while (isspace((unsigned char)*s)) s++;
     if (strncasecmp(s, "UTC", 3) == 0) s += 3;
     else if (strncasecmp(s, "GMT", 3) == 0) s += 3;
@@ -472,11 +329,11 @@ static int convert_offset_to_posix(const char *offset_str, char *out_tz, size_t 
     if (*s == '+') { sign = 1; s++; }
     else if (*s == '-') { sign = -1; s++; }
     else if (isdigit((unsigned char)*s)) { sign = 1; }
-    else return -1;
+    else return 0;
 
     int hours = 0, mins = 0;
     if (strchr(s, ':')) {
-        if (sscanf(s, "%d:%d", &hours, &mins) < 1) return -1;
+        if (sscanf(s, "%d:%d", &hours, &mins) < 1) return 0;
     } else {
         int val = atoi(s);
         if (strlen(s) >= 3 || val >= 100 || val <= -100) {
@@ -487,120 +344,93 @@ static int convert_offset_to_posix(const char *offset_str, char *out_tz, size_t 
             mins = 0;
         }
     }
-
-    if (hours > 14 || mins >= 60) return -1;
-
-    char posix_sign = (sign >= 0) ? '-' : '+';
-    if (mins != 0) {
-        snprintf(out_tz, out_len, "UTC%c%d:%02d", posix_sign, hours, mins);
-    } else {
-        snprintf(out_tz, out_len, "UTC%c%d", posix_sign, hours);
-    }
-    return 0;
+    long total = (long)hours * 3600 + (long)mins * 60;
+    return sign * total;
 }
 
-static char g_iana_tz[128] = "Asia/Shanghai";
+static long get_tz_offset_from_name(const char *tz_name) {
+    if (!tz_name || tz_name[0] == '\0') return 28800;
+
+    if (strcasecmp(tz_name, "Asia/Shanghai") == 0 ||
+        strcasecmp(tz_name, "Asia/Chongqing") == 0 ||
+        strcasecmp(tz_name, "Asia/Harbin") == 0 ||
+        strcasecmp(tz_name, "Asia/Urumqi") == 0 ||
+        strcasecmp(tz_name, "Asia/Hong_Kong") == 0 ||
+        strcasecmp(tz_name, "Asia/Macau") == 0 ||
+        strcasecmp(tz_name, "Asia/Taipei") == 0 ||
+        strcasecmp(tz_name, "Asia/Singapore") == 0 ||
+        strcasecmp(tz_name, "Asia/Kuala_Lumpur") == 0 ||
+        strcasecmp(tz_name, "Asia/Manila") == 0 ||
+        strcasecmp(tz_name, "Asia/Perth") == 0 ||
+        strcasecmp(tz_name, "PRC") == 0 ||
+        strcasecmp(tz_name, "CST") == 0) {
+        return 28800;
+    }
+    if (strcasecmp(tz_name, "Asia/Tokyo") == 0 ||
+        strcasecmp(tz_name, "Asia/Seoul") == 0 ||
+        strcasecmp(tz_name, "JST") == 0 ||
+        strcasecmp(tz_name, "KST") == 0) {
+        return 32400;
+    }
+    if (strcasecmp(tz_name, "Asia/Bangkok") == 0 ||
+        strcasecmp(tz_name, "Asia/Jakarta") == 0 ||
+        strcasecmp(tz_name, "Asia/Ho_Chi_Minh") == 0) {
+        return 25200;
+    }
+    if (strcasecmp(tz_name, "Asia/Kolkata") == 0 || strcasecmp(tz_name, "Asia/Calcutta") == 0) {
+        return 19800;
+    }
+    if (strcasecmp(tz_name, "Asia/Dubai") == 0) {
+        return 14400;
+    }
+    if (strcasecmp(tz_name, "Europe/London") == 0 || strcasecmp(tz_name, "UTC") == 0 || strcasecmp(tz_name, "GMT") == 0) {
+        return 0;
+    }
+    if (strcasecmp(tz_name, "Europe/Berlin") == 0 ||
+        strcasecmp(tz_name, "Europe/Paris") == 0 ||
+        strcasecmp(tz_name, "Europe/Rome") == 0 ||
+        strcasecmp(tz_name, "Europe/Madrid") == 0) {
+        return 3600;
+    }
+    if (strcasecmp(tz_name, "America/New_York") == 0) {
+        return -18000;
+    }
+    if (strcasecmp(tz_name, "America/Chicago") == 0) {
+        return -21600;
+    }
+    if (strcasecmp(tz_name, "America/Los_Angeles") == 0) {
+        return -28800;
+    }
+
+    if (strchr(tz_name, '+') || strchr(tz_name, '-') || strncasecmp(tz_name, "UTC", 3) == 0 || strncasecmp(tz_name, "GMT", 3) == 0) {
+        return parse_offset_string(tz_name);
+    }
+
+    return 28800;
+}
 
 static void init_timezone(const char *custom_tz) {
-    char posix_tz[128] = {0};
-
-    // 1. If custom timezone specified in config
     if (custom_tz && custom_tz[0] != '\0' && strcasecmp(custom_tz, "auto") != 0) {
         snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", custom_tz);
-        if (convert_offset_to_posix(custom_tz, posix_tz, sizeof(posix_tz)) == 0) {
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            return;
-        }
-        if (get_posix_tz_from_android_tzdata(custom_tz, posix_tz, sizeof(posix_tz)) == 0) {
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            return;
-        }
-        setenv("TZ", custom_tz, 1);
-        tzset();
-        return;
-    }
-
-    // 2. Check if TZ environment variable is already set
-    const char *env_tz = getenv("TZ");
-    if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0) {
-        if (strchr(env_tz, '/')) {
+    } else {
+        const char *env_tz = getenv("TZ");
+        if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0 && strchr(env_tz, '/')) {
             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
-        }
-        if (strchr(env_tz, '+') || strchr(env_tz, '-') || isdigit((unsigned char)env_tz[0]) || access(env_tz, R_OK) == 0) {
-            tzset();
-            return;
-        }
-        if (get_posix_tz_from_android_tzdata(env_tz, posix_tz, sizeof(posix_tz)) == 0) {
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            return;
-        }
-        tzset();
-        return;
-    }
-
-    // 3. Try reading Android system property persist.sys.timezone
-    char prop_tz[64] = {0};
-    if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-        if (get_posix_tz_from_android_tzdata(prop_tz, posix_tz, sizeof(posix_tz)) == 0) {
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            return;
-        }
-    }
-
-    // 4. Try ro.sys.timezone / ro.build.timezone
-    if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-        if (get_posix_tz_from_android_tzdata(prop_tz, posix_tz, sizeof(posix_tz)) == 0) {
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            return;
-        }
-    }
-
-    // 5. Fallback: try /system/bin/date +%z
-    char date_z[32] = {0};
-    FILE *pz = popen("/system/bin/date +%z 2>/dev/null", "r");
-    if (pz) {
-        if (fgets(date_z, sizeof(date_z), pz) != NULL) {
-            char *end = date_z + strlen(date_z) - 1;
-            while (end >= date_z && (*end == '\r' || *end == '\n' || *end == ' ')) *end-- = '\0';
-            if (convert_offset_to_posix(date_z, posix_tz, sizeof(posix_tz)) == 0) {
-                pclose(pz);
-                setenv("TZ", posix_tz, 1);
-                tzset();
-                return;
+        } else {
+            char prop_tz[64] = {0};
+            if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+            } else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+            } else {
+                snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
             }
         }
-        pclose(pz);
     }
 
-    // 6. Fallback on standard Linux /etc/timezone
-    FILE *ftz = fopen("/etc/timezone", "r");
-    if (ftz) {
-        char line[64];
-        if (fgets(line, sizeof(line), ftz)) {
-            char *end = line + strlen(line) - 1;
-            while (end >= line && (*end == '\r' || *end == '\n' || *end == ' ')) *end-- = '\0';
-            if (line[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", line);
-                if (get_posix_tz_from_android_tzdata(line, posix_tz, sizeof(posix_tz)) == 0) {
-                    setenv("TZ", posix_tz, 1);
-                } else {
-                    setenv("TZ", line, 1);
-                }
-                tzset();
-                fclose(ftz);
-                return;
-            }
-        }
-        fclose(ftz);
-    }
+    g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
 
+    setenv("TZ", g_iana_tz, 1);
     tzset();
 }
 
@@ -668,14 +498,10 @@ static void ts(char *buffer, size_t size) {
         tz_inited = 1;
     }
     time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    if (tm_info) {
-        strftime(buffer, size, "%Y-%m-%d %H:%M:%S", tm_info);
-    } else {
-        struct tm gm;
-        gmtime_r(&now, &gm);
-        strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &gm);
-    }
+    time_t local_now = now + g_tz_offset_sec;
+    struct tm tm_info;
+    gmtime_r(&local_now, &tm_info);
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_info);
 }
 
 static void rotate_log(const char *filepath) {
@@ -1045,7 +871,10 @@ static int display_status(void) {
 
     log_info("%s service is running (PID: %d)", SERVICE_NAME, pid);
     if (g_iana_tz[0] != '\0') {
-        log_info("Timezone: %s", g_iana_tz);
+        int off_h = abs((int)(g_tz_offset_sec / 3600));
+        int off_m = abs((int)((g_tz_offset_sec % 3600) / 60));
+        char sign = (g_tz_offset_sec >= 0) ? '+' : '-';
+        log_info("Timezone: %s (UTC%c%02d:%02d)", g_iana_tz, sign, off_h, off_m);
     }
 
     char status_path[256];
