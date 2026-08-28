@@ -26,20 +26,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Zig
+      - name: Install Tools (Zig & UPX)
         run: |
           ZIG_VER="0.13.0"
           curl -sSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | tar -xJ -C /tmp
           echo "/tmp/zig-linux-x86_64-${ZIG_VER}" >> $GITHUB_PATH
+
+          sudo apt-get update && sudo apt-get install -y upx
 
       - name: Build static binary and package tarball (${{ matrix.arch }})
         run: |
           # 1. Compile static binary strictly named 'box'
           zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
           file box
+          echo "Original binary size:"
           ls -lh box
 
-          # 2. Package tarball where internal files are strictly box, box.ini, box-service.sh
+          # 2. Compress binary with UPX (reduces to ~25KB - 30KB)
+          upx --best --lzma box || true
+          echo "Compressed binary size:"
+          ls -lh box
+
+          # 3. Package tarball where internal files are strictly box, box.ini, box-service.sh
           mkdir -p pkg
           cp box pkg/
           cp box.ini pkg/

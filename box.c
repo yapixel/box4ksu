@@ -96,12 +96,6 @@ static void get_self_dir(char *dir_buf, size_t size) {
     snprintf(dir_buf, size, ".");
 }
 
-static int get_real_path(const char *path, char *resolved, size_t size) {
-    if (realpath(path, resolved) != NULL) return 0;
-    snprintf(resolved, size, "%s", path);
-    return -1;
-}
-
 // ================= Permission & User Utilities =================
 
 static uid_t resolve_uid(const char *name) {
@@ -314,8 +308,10 @@ static long parse_offset_string(const char *s) {
     else return 0;
 
     int hours = 0, mins = 0;
-    if (strchr(s, ':')) {
-        if (sscanf(s, "%d:%d", &hours, &mins) < 1) return 0;
+    char *colon = strchr(s, ':');
+    if (colon) {
+        hours = atoi(s);
+        mins = atoi(colon + 1);
     } else {
         int val = atoi(s);
         if (strlen(s) >= 3 || val >= 100 || val <= -100) {
@@ -559,14 +555,10 @@ static void show_tail(const char *filepath, int lines) {
         return;
     }
 
-    long read_size = (file_size > 65536) ? 65536 : file_size;
+    char buf[8192];
+    long read_size = (file_size > (long)(sizeof(buf) - 1)) ? (long)(sizeof(buf) - 1) : file_size;
     fseek(f, file_size - read_size, SEEK_SET);
 
-    char *buf = malloc(read_size + 1);
-    if (!buf) {
-        fclose(f);
-        return;
-    }
     size_t bytes = fread(buf, 1, read_size, f);
     buf[bytes] = '\0';
     fclose(f);
@@ -585,7 +577,6 @@ static void show_tail(const char *filepath, int lines) {
     }
     printf("%s", start);
     if (bytes > 0 && buf[bytes - 1] != '\n') printf("\n");
-    free(buf);
 }
 
 // ================= Process & Lock Management =================
@@ -721,15 +712,12 @@ static void acquire_lock(void) {
 static pid_t check_proc_pid(pid_t p) {
     if (p <= 0 || kill(p, 0) != 0) return -1;
 
-    char expected_bin[256];
-    get_real_path(BIN_PATH, expected_bin, sizeof(expected_bin));
-
     char exe_path[64], link_target[256];
     snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", p);
     ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
     if (len > 0) {
         link_target[len] = '\0';
-        if (strcmp(link_target, expected_bin) == 0 || strcmp(link_target, BIN_PATH) == 0) {
+        if (strcmp(link_target, BIN_PATH) == 0 || strstr(link_target, SERVICE_NAME) != NULL) {
             return p;
         }
     }
