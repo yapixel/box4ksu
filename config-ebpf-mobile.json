@@ -120,6 +120,16 @@
       },
       {
         "rule_set": [
+          "geosite/openai",
+          "geosite/anthropic",
+          "geosite/google",
+          "geosite/google-cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "rule_set": [
           "geosite/alibaba",
           "geosite/category-games@cn",
           "geosite/apple-cn",
@@ -364,11 +374,11 @@
       {
         "tag": "AWAvenue-Ads",
         "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.srs",
+        "format": "source",
+        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json",
         "http_client": "detour_proxy",
         "update_interval": "24h",
-        "path": "./rule_set/Ads_AWAvenue.srs"
+        "path": "./rule_set/Ads_AWAvenue.json"
       },
       {
         "tag": [
@@ -555,30 +565,6 @@
         "action": "reject"
       },
       {
-        "rule_set": [
-          "geosite/alibaba",
-          "geosite/category-games@cn",
-          "geosite/apple-cn",
-          "geosite/private",
-          "geosite/cn"
-        ],
-        "action": "route",
-        "outbound": "direct"
-      },
-      {
-        "domain": [
-          "snauth.wps.cn"
-        ],
-        "action": "reject"
-      },
-      {
-        "package_name": [
-          "com.xiaomi.xmsf"
-        ],
-        "action": "route",
-        "outbound": "US"
-      },
-      {
         "rule_set": "geosite/netflix",
         "action": "route",
         "outbound": "Netflix"
@@ -595,6 +581,30 @@
         ],
         "action": "route",
         "outbound": "US"
+      },
+      {
+        "package_name": [
+          "com.xiaomi.xmsf"
+        ],
+        "action": "route",
+        "outbound": "US"
+      },
+      {
+        "domain": [
+          "snauth.wps.cn"
+        ],
+        "action": "reject"
+      },
+      {
+        "rule_set": [
+          "geosite/alibaba",
+          "geosite/category-games@cn",
+          "geosite/apple-cn",
+          "geosite/private",
+          "geosite/cn"
+        ],
+        "action": "route",
+        "outbound": "direct"
       },
       {
         "rule_set": [

@@ -306,11 +306,11 @@
       {
         "tag": "AWAvenue-Ads",
         "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.srs",
+        "format": "source",
+        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json",
         "http_client": "detour_proxy",
         "update_interval": "24h",
-        "path": "./rule_set/Ads_AWAvenue.srs"
+        "path": "./rule_set/Ads_AWAvenue.json"
       },
       {
         "tag": [
