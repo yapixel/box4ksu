@@ -2,10 +2,10 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "dev" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "dev" ]
   workflow_dispatch:
 
 permissions:
@@ -58,7 +58,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -81,9 +81,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
-          if [ "$TAG_NAME" = "$GITHUB_REF" ]; then
-            TAG_NAME="nightly"
-          fi
           gh release create "$TAG_NAME" release-assets/* \
             --title "Release ${TAG_NAME}" \
             --generate-notes \
