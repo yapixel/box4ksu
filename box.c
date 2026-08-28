@@ -299,68 +299,48 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
 static long g_tz_offset_sec = 28800; // Default +8 hours (CST UTC+8)
 static char g_iana_tz[128] = "Asia/Shanghai";
 
+// 修复：改进 Android 属性获取函数
 static int get_android_prop(const char *prop_name, char *out_val, size_t out_len) {
     if (!prop_name || !out_val || out_len == 0) return -1;
-    out_val[0] = '\0';
-
-    int pipe_fd[2];
-    if (pipe(pipe_fd) != 0) return -1;
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipe_fd[0]);
-        close(pipe_fd[1]);
-        return -1;
+    
+    char cmd[256];
+    FILE *p = NULL;
+    int ret = -1;
+    
+    // 方法1: 尝试直接调用 getprop（如果它在 PATH 中）
+    snprintf(cmd, sizeof(cmd), "getprop %s 2>/dev/null", prop_name);
+    p = popen(cmd, "r");
+    
+    // 方法2: 如果方法1失败，尝试完整路径
+    if (!p) {
+        snprintf(cmd, sizeof(cmd), "/system/bin/getprop %s 2>/dev/null", prop_name);
+        p = popen(cmd, "r");
     }
-
-    if (pid == 0) {
-        close(pipe_fd[0]);
-        dup2(pipe_fd[1], STDOUT_FILENO);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
+    
+    // 方法3: 尝试 /vendor/bin/getprop（某些设备）
+    if (!p) {
+        snprintf(cmd, sizeof(cmd), "/vendor/bin/getprop %s 2>/dev/null", prop_name);
+        p = popen(cmd, "r");
+    }
+    
+    if (!p) return -1;
+    
+    // 读取属性值
+    if (fgets(out_val, out_len, p) != NULL) {
+        // 去除末尾的换行符、回车符和空格
+        size_t len = strlen(out_val);
+        while (len > 0 && (out_val[len-1] == '\n' || out_val[len-1] == '\r' || 
+                          out_val[len-1] == ' ' || out_val[len-1] == '\t')) {
+            out_val[--len] = '\0';
         }
-        close(pipe_fd[1]);
-
-        char *const argv1[] = {"/system/bin/getprop", (char *)prop_name, NULL};
-        char *const argv2[] = {"/vendor/bin/getprop", (char *)prop_name, NULL};
-        char *const argv3[] = {"getprop", (char *)prop_name, NULL};
-
-        execv("/system/bin/getprop", argv1);
-        execv("/vendor/bin/getprop", argv2);
-        execvp("getprop", argv3);
-        _exit(127);
+        // 如果属性值不为空，返回成功
+        if (len > 0) {
+            ret = 0;
+        }
     }
-
-    close(pipe_fd[1]);
-
-    ssize_t total = 0;
-    char buf[256];
-    while (total < (ssize_t)sizeof(buf) - 1) {
-        ssize_t n = read(pipe_fd[0], buf + total, sizeof(buf) - 1 - total);
-        if (n <= 0) break;
-        total += n;
-    }
-    buf[total] = '\0';
-    close(pipe_fd[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-
-    char *p = buf;
-    while (isspace((unsigned char)*p)) p++;
-    char *end = p + strlen(p) - 1;
-    while (end >= p && isspace((unsigned char)*end)) {
-        *end = '\0';
-        end--;
-    }
-
-    if (p[0] != '\0') {
-        snprintf(out_val, out_len, "%s", p);
-        return 0;
-    }
-    return -1;
+    
+    pclose(p);
+    return ret;
 }
 
 static long parse_offset_string(const char *s) {
@@ -454,6 +434,7 @@ static long get_tz_offset_from_name(const char *tz_name) {
     return 28800;
 }
 
+// 修复：改进时区初始化函数，添加调试日志
 static void init_timezone(const char *custom_tz) {
     char tz_buf[128] = {0};
     
@@ -464,17 +445,21 @@ static void init_timezone(const char *custom_tz) {
         if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0 && strchr(env_tz, '/')) {
             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", env_tz);
         } else {
+            // 尝试从 Android 系统属性获取时区
             char prop_tz[64] = {0};
             
+            // 优先使用 persist.sys.timezone（用户设置的时区）
             if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+                // 调试日志（生产环境可注释掉）
+                // printf("[DEBUG] Timezone from persist.sys.timezone: %s\n", g_iana_tz);
             }
+            // 如果失败，尝试 ro.sys.timezone（系统默认时区）
             else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
+                // printf("[DEBUG] Timezone from ro.sys.timezone: %s\n", g_iana_tz);
             }
-            else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", prop_tz);
-            }
+            // 如果都失败，尝试从 /etc/timezone 读取（部分设备）
             else {
                 FILE *tz_file = fopen("/etc/timezone", "r");
                 if (tz_file) {
@@ -483,20 +468,25 @@ static void init_timezone(const char *custom_tz) {
                         if (newline) *newline = '\0';
                         if (tz_buf[0] != '\0') {
                             snprintf(g_iana_tz, sizeof(g_iana_tz), "%.127s", tz_buf);
+                            // printf("[DEBUG] Timezone from /etc/timezone: %s\n", g_iana_tz);
                         }
                     }
                     fclose(tz_file);
                 }
             }
             
+            // 如果所有方法都失败，使用默认时区
             if (g_iana_tz[0] == '\0') {
+                // printf("[DEBUG] No timezone found, using default Asia/Shanghai\n");
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
             }
         }
     }
 
+    // 计算时区偏移
     g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
     
+    // 设置环境变量
     setenv("TZ", g_iana_tz, 1);
     tzset();
 }
