@@ -32,17 +32,33 @@ jobs:
           curl -sSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | tar -xJ -C /tmp
           echo "/tmp/zig-linux-x86_64-${ZIG_VER}" >> $GITHUB_PATH
 
-      - name: Build static binary (${{ matrix.arch }})
+      - name: Build static binary and package archives (${{ matrix.arch }})
         run: |
-          zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box-${{ matrix.arch }} box.c
-          file box-${{ matrix.arch }}
-          ls -lh box-${{ matrix.arch }}
+          # 1. Compile static binary
+          zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
+          file box
+          ls -lh box
+          cp box box-${{ matrix.arch }}
+
+          # 2. Package archive where internal executable name is strictly 'box'
+          mkdir -p pkg
+          cp box pkg/
+          cp box.ini pkg/
+          cp box-service.sh pkg/
+          chmod 755 pkg/box pkg/box-service.sh
+
+          tar -czf box-${{ matrix.arch }}.tar.gz -C pkg .
+          zip -j box-${{ matrix.arch }}.zip pkg/*
+          rm -rf pkg
 
       - name: Upload build artifact (${{ matrix.arch }})
         uses: actions/upload-artifact@v7
         with:
           name: box-${{ matrix.arch }}
-          path: box-${{ matrix.arch }}
+          path: |
+            box-${{ matrix.arch }}
+            box-${{ matrix.arch }}.tar.gz
+            box-${{ matrix.arch }}.zip
 
   release:
     needs: build
@@ -60,7 +76,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          find artifacts -type f -name "box-*" -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name "box-*" \) -exec cp {} release-assets/ \;
           cp box.ini release-assets/
           cp box-service.sh release-assets/
           cd release-assets
