@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -8,14 +9,21 @@
 #include <time.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <dirent.h>
 #include <grp.h>
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
-#include <sys/sysinfo.h>
+#include <sys/syscall.h>
+
+struct linux_dirent64 {
+    uint64_t        d_ino;
+    int64_t         d_off;
+    unsigned short  d_reclen;
+    unsigned char   d_type;
+    char            d_name[];
+};
 
 typedef struct {
     char service_name[64];
@@ -393,13 +401,15 @@ static void init_timezone(const char *custom_tz) {
             } else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
                 snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
             } else {
-                FILE *tz_file = fopen("/etc/timezone", "r");
-                if (tz_file) {
-                    if (fgets(tz_buf, sizeof(tz_buf), tz_file)) {
+                int tz_fd = open("/etc/timezone", O_RDONLY);
+                if (tz_fd >= 0) {
+                    ssize_t n = read(tz_fd, tz_buf, sizeof(tz_buf) - 1);
+                    close(tz_fd);
+                    if (n > 0) {
+                        tz_buf[n] = '\0';
                         char *trimmed = trim_str(tz_buf);
                         if (trimmed && trimmed[0] != '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", trimmed);
                     }
-                    fclose(tz_file);
                 }
             }
             if (g_iana_tz[0] == '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
@@ -408,7 +418,6 @@ static void init_timezone(const char *custom_tz) {
 
     g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
     setenv("TZ", g_iana_tz, 1);
-    tzset();
 }
 
 static void load_config(void) {
@@ -439,14 +448,25 @@ static void load_config(void) {
     };
 
     for (int i = 0; candidates[i] != NULL; i++) {
-        FILE *f = fopen(candidates[i], "r");
-        if (f) {
-            char line[256];
-            while (fgets(line, sizeof(line), f)) {
-                parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+        int fd = open(candidates[i], O_RDONLY);
+        if (fd >= 0) {
+            char buf[2048];
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0) {
+                buf[n] = '\0';
+                char *line = buf;
+                while (*line) {
+                    char *next = strchr(line, '\n');
+                    if (next) *next = '\0';
+                    char *r = strchr(line, '\r');
+                    if (r) *r = '\0';
+                    parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+                    if (!next) break;
+                    line = next + 1;
+                }
+                break;
             }
-            fclose(f);
-            break;
         }
     }
 
@@ -490,7 +510,9 @@ static void ts(char *buffer, size_t size) {
     time_t local_now = now + g_tz_offset_sec;
     struct tm tm_info;
     gmtime_r(&local_now, &tm_info);
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_info);
+    snprintf(buffer, size, "%04d-%02d-%02d %02d:%02d:%02d",
+             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+             tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
 }
 
 static void rotate_log(const char *filepath) {
@@ -527,10 +549,10 @@ static void log_msg(int is_err, const char *fmt, ...) {
     }
     fflush(out);
 
-    FILE *f = fopen(target_file, "a");
-    if (f) {
-        fprintf(f, "[%s] %s %s\n", timestamp, tag, message);
-        fclose(f);
+    int log_fd = open(target_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (log_fd >= 0) {
+        dprintf(log_fd, "[%s] %s %s\n", timestamp, tag, message);
+        close(log_fd);
     }
 }
 
@@ -539,29 +561,26 @@ static void log_msg(int is_err, const char *fmt, ...) {
 
 static void show_tail(const char *filepath, int lines) {
     if (lines <= 0) lines = 10;
-    FILE *f = fopen(filepath, "r");
-    if (!f) {
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
         printf("(empty)\n");
         return;
     }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return;
-    }
-    long file_size = ftell(f);
+    off_t file_size = lseek(fd, 0, SEEK_END);
     if (file_size <= 0) {
         printf("(empty)\n");
-        fclose(f);
+        close(fd);
         return;
     }
 
     char buf[8192];
-    long read_size = (file_size > (long)(sizeof(buf) - 1)) ? (long)(sizeof(buf) - 1) : file_size;
-    fseek(f, file_size - read_size, SEEK_SET);
+    off_t read_size = (file_size > (off_t)(sizeof(buf) - 1)) ? (off_t)(sizeof(buf) - 1) : file_size;
+    lseek(fd, file_size - read_size, SEEK_SET);
 
-    size_t bytes = fread(buf, 1, read_size, f);
+    ssize_t bytes = read(fd, buf, read_size);
+    if (bytes <= 0) bytes = 0;
     buf[bytes] = '\0';
-    fclose(f);
+    close(fd);
 
     int count = 0;
     char *start = buf + bytes;
@@ -627,43 +646,42 @@ static void release_lock(void) {
 static void write_lock_pid(void) {
     char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    FILE *f = fopen(pid_path, "w");
-    if (f) {
-        fprintf(f, "%d\n", getpid());
-        fclose(f);
+    int fd = open(pid_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        dprintf(fd, "%d\n", getpid());
+        close(fd);
     }
 }
 
 static int is_lock_stale(void) {
     char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    FILE *f = fopen(pid_path, "r");
-    if (f) {
+    int fd = open(pid_path, O_RDONLY);
+    if (fd >= 0) {
         char pbuf[32];
-        if (fgets(pbuf, sizeof(pbuf), f)) {
+        ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
+        close(fd);
+        if (n > 0) {
+            pbuf[n] = '\0';
             pid_t lock_pid = (pid_t)atoi(pbuf);
-            fclose(f);
             if (lock_pid > 0) {
                 if (lock_pid == getpid()) return 0;
                 if (kill(lock_pid, 0) != 0 && errno == ESRCH) return 1;
 
                 char comm_path[64];
                 snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", lock_pid);
-                FILE *cf = fopen(comm_path, "r");
-                if (cf) {
+                int cfd = open(comm_path, O_RDONLY);
+                if (cfd >= 0) {
                     char comm[64] = {0};
-                    if (fgets(comm, sizeof(comm), cf)) {
-                        comm[strcspn(comm, "\r\n")] = 0;
-                        fclose(cf);
+                    ssize_t cn = read(cfd, comm, sizeof(comm) - 1);
+                    close(cfd);
+                    if (cn > 0) {
+                        comm[cn] = '\0';
                         if (strstr(comm, "box") != NULL) return 0;
-                    } else {
-                        fclose(cf);
                     }
                 }
                 return 1;
             }
-        } else {
-            fclose(f);
         }
     }
     struct stat st;
@@ -724,11 +742,11 @@ static pid_t check_proc_pid(pid_t p) {
 
     char cmdline_path[64];
     snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", p);
-    FILE *fcmd = fopen(cmdline_path, "r");
-    if (fcmd) {
+    int cfd = open(cmdline_path, O_RDONLY);
+    if (cfd >= 0) {
         char cmd_buf[512] = {0};
-        size_t n = fread(cmd_buf, 1, sizeof(cmd_buf) - 1, fcmd);
-        fclose(fcmd);
+        ssize_t n = read(cfd, cmd_buf, sizeof(cmd_buf) - 1);
+        close(cfd);
         if (n > 0) {
             int match_bin = (strstr(cmd_buf, SERVICE_NAME) != NULL);
             int match_dir = (WORK_DIR[0] != '\0' && memmem(cmd_buf, n, WORK_DIR, strlen(WORK_DIR)) != NULL);
@@ -738,60 +756,63 @@ static pid_t check_proc_pid(pid_t p) {
 
     char comm_path[64];
     snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
-    FILE *fcomm = fopen(comm_path, "r");
-    if (fcomm) {
+    int cmfd = open(comm_path, O_RDONLY);
+    if (cmfd >= 0) {
         char comm_buf[64] = {0};
-        if (fgets(comm_buf, sizeof(comm_buf), fcomm)) {
+        ssize_t n = read(cmfd, comm_buf, sizeof(comm_buf) - 1);
+        close(cmfd);
+        if (n > 0) {
             comm_buf[strcspn(comm_buf, "\r\n")] = 0;
-            if (strcmp(comm_buf, SERVICE_NAME) == 0 && len <= 0) {
-                fclose(fcomm);
-                return p;
-            }
+            if (strcmp(comm_buf, SERVICE_NAME) == 0 && len <= 0) return p;
         }
-        fclose(fcomm);
     }
     return -1;
 }
 
 static pid_t scan_proc_for_service(void) {
-    DIR *dir = opendir("/proc");
-    if (!dir) return -1;
-    struct dirent *entry;
+    int fd = open("/proc", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return -1;
+    char buf[1024];
     pid_t found_pid = -1;
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (!isdigit((unsigned char)entry->d_name[0])) continue;
-        pid_t p = (pid_t)atoi(entry->d_name);
-        if (p <= 0 || p == getpid()) continue;
-        if (check_proc_pid(p) > 0) {
-            found_pid = p;
-            break;
+    while (1) {
+        long nread = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+        if (nread <= 0) break;
+        for (long bpos = 0; bpos < nread;) {
+            struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + bpos);
+            if (isdigit((unsigned char)d->d_name[0])) {
+                pid_t p = (pid_t)atoi(d->d_name);
+                if (p > 0 && p != getpid() && check_proc_pid(p) > 0) {
+                    found_pid = p;
+                    break;
+                }
+            }
+            bpos += d->d_reclen;
         }
+        if (found_pid > 0) break;
     }
-    closedir(dir);
+    close(fd);
     return found_pid;
 }
 
 static pid_t get_pid(void) {
-    FILE *f = fopen(PID_FILE, "r");
-    if (f) {
+    int fd = open(PID_FILE, O_RDONLY);
+    if (fd >= 0) {
         char pbuf[32];
-        if (fgets(pbuf, sizeof(pbuf), f)) {
+        ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
+        close(fd);
+        if (n > 0) {
+            pbuf[n] = '\0';
             pid_t p = (pid_t)atoi(pbuf);
-            if (p > 0 && check_proc_pid(p) > 0) {
-                fclose(f);
-                return p;
-            }
+            if (p > 0 && check_proc_pid(p) > 0) return p;
         }
-        fclose(f);
     }
 
     pid_t discovered_pid = scan_proc_for_service();
     if (discovered_pid > 0) {
-        FILE *pf = fopen(PID_FILE, "w");
-        if (pf) {
-            fprintf(pf, "%d\n", discovered_pid);
-            fclose(pf);
+        int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (pf >= 0) {
+            dprintf(pf, "%d\n", discovered_pid);
+            close(pf);
         }
         return discovered_pid;
     }
@@ -832,6 +853,34 @@ static void fmt_uptime(long seconds, char *buf, size_t size) {
     snprintf(buf + strlen(buf), size - strlen(buf), "%lds", s);
 }
 
+static int count_proc_sockets(pid_t pid) {
+    char fd_dir[64];
+    snprintf(fd_dir, sizeof(fd_dir), "/proc/%d/fd", pid);
+    int fd = open(fd_dir, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return 0;
+    char buf[1024];
+    int count = 0;
+    while (1) {
+        long nread = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+        if (nread <= 0) break;
+        for (long bpos = 0; bpos < nread;) {
+            struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + bpos);
+            if (d->d_name[0] != '.') {
+                char sym_path[128], target[64];
+                snprintf(sym_path, sizeof(sym_path), "%.60s/%.60s", fd_dir, d->d_name);
+                ssize_t len = readlink(sym_path, target, sizeof(target) - 1);
+                if (len > 0) {
+                    target[len] = '\0';
+                    if (strncmp(target, "socket:", 7) == 0) count++;
+                }
+            }
+            bpos += d->d_reclen;
+        }
+    }
+    close(fd);
+    return count;
+}
+
 static int display_status(void) {
     pid_t pid = get_pid();
     if (pid <= 0) {
@@ -850,23 +899,24 @@ static int display_status(void) {
 
     char status_path[64];
     snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
-    FILE *f = fopen(status_path, "r");
-    if (f) {
-        char line[128];
-        long long mem_kb = -1;
-        while (fgets(line, sizeof(line), f)) {
-            if (strncmp(line, "VmRSS:", 6) == 0) {
-                char *p = line + 6;
-                while (*p == ' ' || *p == '\t') p++;
-                mem_kb = strtoll(p, NULL, 10);
-                break;
+    int sfd = open(status_path, O_RDONLY);
+    if (sfd >= 0) {
+        char sbuf[1024];
+        ssize_t sn = read(sfd, sbuf, sizeof(sbuf) - 1);
+        close(sfd);
+        if (sn > 0) {
+            sbuf[sn] = '\0';
+            char *vm = strstr(sbuf, "VmRSS:");
+            if (vm) {
+                vm += 6;
+                while (*vm == ' ' || *vm == '\t') vm++;
+                long long mem_kb = strtoll(vm, NULL, 10);
+                if (mem_kb >= 0) {
+                    char mem_str[32];
+                    fmt_mem(mem_kb, mem_str, sizeof(mem_str));
+                    log_info("Memory usage: %s", mem_str);
+                }
             }
-        }
-        fclose(f);
-        if (mem_kb >= 0) {
-            char mem_str[32];
-            fmt_mem(mem_kb, mem_str, sizeof(mem_str));
-            log_info("Memory usage: %s", mem_str);
         }
     }
 
@@ -875,16 +925,24 @@ static int display_status(void) {
     if (clock_gettime(CLOCK_BOOTTIME, &bts) == 0) {
         sys_uptime_sec = (long long)bts.tv_sec;
     } else {
-        struct sysinfo si;
-        if (sysinfo(&si) == 0) sys_uptime_sec = (long long)si.uptime;
+        int ufd = open("/proc/uptime", O_RDONLY);
+        if (ufd >= 0) {
+            char ubuf[64] = {0};
+            ssize_t un = read(ufd, ubuf, sizeof(ubuf) - 1);
+            close(ufd);
+            if (un > 0) sys_uptime_sec = (long long)atoll(ubuf);
+        }
     }
 
     char stat_path[64];
     snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
-    FILE *stat_f = fopen(stat_path, "r");
-    if (stat_f) {
+    int stfd = open(stat_path, O_RDONLY);
+    if (stfd >= 0) {
         char stat_buf[512];
-        if (fgets(stat_buf, sizeof(stat_buf), stat_f)) {
+        ssize_t stn = read(stfd, stat_buf, sizeof(stat_buf) - 1);
+        close(stfd);
+        if (stn > 0) {
+            stat_buf[stn] = '\0';
             char *right_paren = strrchr(stat_buf, ')');
             if (right_paren) {
                 unsigned long long utime = 0, stime = 0, starttime = 0;
@@ -923,52 +981,32 @@ static int display_status(void) {
                 log_info("Uptime: %s", uptime_str);
             }
         }
-        fclose(stat_f);
     }
 
-    char fd_dir[64];
-    snprintf(fd_dir, sizeof(fd_dir), "/proc/%d/fd", pid);
-    DIR *dir = opendir(fd_dir);
-    if (dir) {
-        int socket_count = 0;
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_name[0] == '.') continue;
-            char sym_path[256], target[64];
-            snprintf(sym_path, sizeof(sym_path), "%.60s/%.60s", fd_dir, entry->d_name);
-            ssize_t len = readlink(sym_path, target, sizeof(target) - 1);
-            if (len > 0) {
-                target[len] = '\0';
-                if (strncmp(target, "socket:", 7) == 0) socket_count++;
-            }
-        }
-        closedir(dir);
-        log_info("Network sockets: %d", socket_count);
-    }
+    int socket_count = count_proc_sockets(pid);
+    log_info("Network sockets: %d", socket_count);
 
     char io_path[64];
     snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
-    FILE *io_f = fopen(io_path, "r");
-    if (io_f) {
-        char line[128];
-        long long read_bytes = -1, write_bytes = -1;
-        while (fgets(line, sizeof(line), io_f)) {
-            if (strncmp(line, "read_bytes:", 11) == 0) {
-                char *p = line + 11;
-                while (*p == ' ' || *p == '\t') p++;
-                read_bytes = strtoll(p, NULL, 10);
-            } else if (strncmp(line, "write_bytes:", 12) == 0) {
-                char *p = line + 12;
-                while (*p == ' ' || *p == '\t') p++;
-                write_bytes = strtoll(p, NULL, 10);
+    int iofd = open(io_path, O_RDONLY);
+    if (iofd >= 0) {
+        char io_buf[512];
+        ssize_t ion = read(iofd, io_buf, sizeof(io_buf) - 1);
+        close(iofd);
+        if (ion > 0) {
+            io_buf[ion] = '\0';
+            long long read_bytes = -1, write_bytes = -1;
+            char *rpos = strstr(io_buf, "read_bytes:");
+            if (rpos) read_bytes = strtoll(rpos + 11, NULL, 10);
+            char *wpos = strstr(io_buf, "write_bytes:");
+            if (wpos) write_bytes = strtoll(wpos + 12, NULL, 10);
+
+            if (read_bytes >= 0 && write_bytes >= 0) {
+                char r_str[32], w_str[32];
+                fmt_mem(read_bytes / 1024LL, r_str, sizeof(r_str));
+                fmt_mem(write_bytes / 1024LL, w_str, sizeof(w_str));
+                log_info("Disk I/O: read %s / write %s", r_str, w_str);
             }
-        }
-        fclose(io_f);
-        if (read_bytes >= 0 && write_bytes >= 0) {
-            char r_str[32], w_str[32];
-            fmt_mem(read_bytes / 1024LL, r_str, sizeof(r_str));
-            fmt_mem(write_bytes / 1024LL, w_str, sizeof(w_str));
-            log_info("Disk I/O: read %s / write %s", r_str, w_str);
         }
     }
 
@@ -1027,10 +1065,13 @@ static int do_check(void) {
 
 static void check_stale_pid(void) {
     if (access(PID_FILE, F_OK) == 0) {
-        FILE *f = fopen(PID_FILE, "r");
-        if (f) {
+        int fd = open(PID_FILE, O_RDONLY);
+        if (fd >= 0) {
             char pbuf[32];
-            if (fgets(pbuf, sizeof(pbuf), f)) {
+            ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
+            close(fd);
+            if (n > 0) {
+                pbuf[n] = '\0';
                 pid_t old_pid = (pid_t)atoi(pbuf);
                 if (old_pid > 0 && kill(old_pid, 0) != 0) {
                     log_info("Cleaning stale PID file (PID %d not found)", old_pid);
@@ -1039,7 +1080,6 @@ static void check_stale_pid(void) {
             } else {
                 clear_pid();
             }
-            fclose(f);
         }
     }
 }
@@ -1113,10 +1153,10 @@ static int start_service(void) {
         _exit(127);
     }
 
-    FILE *pf = fopen(PID_FILE, "w");
-    if (pf) {
-        fprintf(pf, "%d\n", pid);
-        fclose(pf);
+    int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (pf >= 0) {
+        dprintf(pf, "%d\n", pid);
+        close(pf);
     }
 
     int max_attempts = START_TIMEOUT > 0 ? START_TIMEOUT : 3;
