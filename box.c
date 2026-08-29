@@ -482,11 +482,6 @@ static void load_config(void) {
 // ================= Logging System =================
 
 static void ts(char *buffer, size_t size) {
-    static int tz_inited = 0;
-    if (!tz_inited) {
-        init_timezone(g_cfg.timezone[0] != '\0' ? g_cfg.timezone : NULL);
-        tz_inited = 1;
-    }
     time_t now = time(NULL);
     time_t local_now = now + g_tz_offset_sec;
     struct tm tm_info;
