@@ -1023,9 +1023,18 @@ static int do_check(void) {
 
     close(pipefd[1]);
     char output[1024] = {0};
+    char discard[256];
     size_t total = 0;
     ssize_t n;
-    while ((n = read(pipefd[0], output + total, sizeof(output) - 1 - total)) > 0) total += n;
+    while (1) {
+        if (total < sizeof(output) - 1) {
+            n = read(pipefd[0], output + total, sizeof(output) - 1 - total);
+            if (n > 0) total += n;
+        } else {
+            n = read(pipefd[0], discard, sizeof(discard));
+        }
+        if (n <= 0) break;
+    }
     output[total] = '\0';
     close(pipefd[0]);
 
