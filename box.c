@@ -1142,6 +1142,11 @@ static int start_service(void) {
             break;
         } else if (w < 0 && errno == ECHILD) {
             if (kill(pid, 0) != 0) { child_alive = 0; break; }
+        } else if (w < 0) {
+            if (errno == EINTR) { i--; continue; }
+            log_error("Failed to wait for %s startup: %s", SERVICE_NAME, strerror(errno));
+            child_alive = 0;
+            break;
         }
     }
 
