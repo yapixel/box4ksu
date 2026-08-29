@@ -1218,9 +1218,6 @@ static int restart_service(void) {
         clear_pid();
     }
 
-    sync();
-    usleep(300000);
-
     return start_service();
 }
 
