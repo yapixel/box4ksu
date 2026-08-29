@@ -427,12 +427,18 @@ static void load_config(void) {
         char buf[256];
         char line[256];
         int lpos = 0;
+        int line_truncated = 0;
         ssize_t n;
         int found = 1;
         while ((n = read(fd, buf, sizeof(buf))) > 0) {
             for (ssize_t j = 0; j < n; j++) {
                 char c = buf[j];
                 if (c == '\n' || c == '\r') {
+                    if (line_truncated) {
+                        fprintf(stderr, "Configuration line too long in %s\n", candidates[i]);
+                        close(fd);
+                        return;
+                    }
                     if (lpos > 0) {
                         line[lpos] = '\0';
                         parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
@@ -440,8 +446,15 @@ static void load_config(void) {
                     }
                 } else if (lpos < (int)sizeof(line) - 1) {
                     line[lpos++] = c;
+                } else {
+                    line_truncated = 1;
                 }
             }
+        }
+        if (line_truncated) {
+            fprintf(stderr, "Configuration line too long in %s\n", candidates[i]);
+            close(fd);
+            return;
         }
         if (lpos > 0) {
             line[lpos] = '\0';
