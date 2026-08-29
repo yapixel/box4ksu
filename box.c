@@ -708,7 +708,7 @@ static pid_t check_proc_pid(pid_t p) {
     ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
     if (len > 0) {
         link_target[len] = '\0';
-        if (strcmp(link_target, BIN_PATH) == 0 || strstr(link_target, SERVICE_NAME) != NULL) {
+        if (strcmp(link_target, BIN_PATH) == 0) {
             return p;
         }
     }
@@ -721,22 +721,10 @@ static pid_t check_proc_pid(pid_t p) {
         ssize_t n = read(cfd, cmd_buf, sizeof(cmd_buf) - 1);
         close(cfd);
         if (n > 0) {
-            int match_bin = (strstr(cmd_buf, SERVICE_NAME) != NULL);
+            size_t cmd0_len = strnlen(cmd_buf, (size_t)n);
+            int match_bin = (strlen(BIN_PATH) == cmd0_len && memcmp(cmd_buf, BIN_PATH, cmd0_len) == 0);
             int match_dir = (WORK_DIR[0] != '\0' && memmem(cmd_buf, n, WORK_DIR, strlen(WORK_DIR)) != NULL);
             if (match_bin && match_dir) return p;
-        }
-    }
-
-    char comm_path[64];
-    snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", p);
-    int cmfd = open(comm_path, O_RDONLY);
-    if (cmfd >= 0) {
-        char comm_buf[64] = {0};
-        ssize_t n = read(cmfd, comm_buf, sizeof(comm_buf) - 1);
-        close(cmfd);
-        if (n > 0) {
-            comm_buf[strcspn(comm_buf, "\r\n")] = 0;
-            if (strcmp(comm_buf, SERVICE_NAME) == 0 && len <= 0) return p;
         }
     }
     return -1;
