@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <grp.h>
 #include <ctype.h>
@@ -72,6 +73,7 @@ static pid_t get_pid(void);
 static void clear_pid(void);
 static void release_lock(void);
 static void reset_lock_cleanup_signals(void);
+static int waitpid_retry(pid_t pid, int *status);
 static int display_status(void);
 static int do_check(void);
 static int start_service(void);
@@ -108,29 +110,42 @@ static void get_self_dir(char *dir_buf, size_t size) {
 
 // ================= Permission & User Utilities =================
 
-static uid_t resolve_uid(const char *name) {
-    if (!name || name[0] == '\0') return 0;
-    if (isdigit((unsigned char)name[0])) return (uid_t)atoi(name);
-    if (strcmp(name, "root") == 0) return 0;
-    if (strcmp(name, "system") == 0) return 1000;
-    if (strcmp(name, "shell") == 0) return 2000;
-    if (strcmp(name, "nobody") == 0) return 9999;
+static int parse_id(const char *name, unsigned long max, unsigned long *out) {
+    char *end;
+    unsigned long value;
+    if (!name || *name == '\0' || *name == '-') return -1;
+    errno = 0;
+    value = strtoul(name, &end, 10);
+    if (errno || *end != '\0' || value > max) return -1;
+    *out = value;
     return 0;
 }
 
-static gid_t resolve_gid(const char *name) {
-    if (!name || name[0] == '\0') return 0;
-    if (isdigit((unsigned char)name[0])) return (gid_t)atoi(name);
-    if (strcmp(name, "root") == 0) return 0;
-    if (strcmp(name, "system") == 0) return 1000;
-    if (strcmp(name, "shell") == 0) return 2000;
-    if (strcmp(name, "inet") == 0) return 3003;
-    if (strcmp(name, "net_raw") == 0) return 3004;
-    if (strcmp(name, "net_admin") == 0) return 3005;
-    if (strcmp(name, "net_bw_stats") == 0) return 3006;
-    if (strcmp(name, "net_bw_acct") == 0) return 3007;
-    if (strcmp(name, "everybody") == 0) return 9997;
-    if (strcmp(name, "nobody") == 0) return 9999;
+static int resolve_uid(const char *name, uid_t *out) {
+    unsigned long value;
+    if (strcmp(name, "root") == 0) value = 0;
+    else if (strcmp(name, "system") == 0) value = 1000;
+    else if (strcmp(name, "shell") == 0) value = 2000;
+    else if (strcmp(name, "nobody") == 0) value = 9999;
+    else if (parse_id(name, (unsigned long)((uid_t)-1), &value) != 0) return -1;
+    *out = (uid_t)value;
+    return 0;
+}
+
+static int resolve_gid(const char *name, gid_t *out) {
+    unsigned long value;
+    if (strcmp(name, "root") == 0) value = 0;
+    else if (strcmp(name, "system") == 0) value = 1000;
+    else if (strcmp(name, "shell") == 0) value = 2000;
+    else if (strcmp(name, "inet") == 0) value = 3003;
+    else if (strcmp(name, "net_raw") == 0) value = 3004;
+    else if (strcmp(name, "net_admin") == 0) value = 3005;
+    else if (strcmp(name, "net_bw_stats") == 0) value = 3006;
+    else if (strcmp(name, "net_bw_acct") == 0) value = 3007;
+    else if (strcmp(name, "everybody") == 0) value = 9997;
+    else if (strcmp(name, "nobody") == 0) value = 9999;
+    else if (parse_id(name, (unsigned long)((gid_t)-1), &value) != 0) return -1;
+    *out = (gid_t)value;
     return 0;
 }
 
@@ -150,8 +165,18 @@ static int apply_credentials(const char *user_spec) {
         group_part = colon + 1;
     }
 
-    uid_t target_uid = resolve_uid(user_part);
-    gid_t target_gid = (group_part && group_part[0] != '\0') ? resolve_gid(group_part) : (gid_t)target_uid;
+    uid_t target_uid;
+    gid_t target_gid;
+    if (resolve_uid(user_part, &target_uid) != 0) {
+        log_msg(1, "Invalid UID: %s", user_part);
+        return -1;
+    }
+    if (group_part && group_part[0] != '\0') {
+        if (resolve_gid(group_part, &target_gid) != 0) {
+            log_msg(1, "Invalid GID: %s", group_part);
+            return -1;
+        }
+    } else target_gid = (gid_t)target_uid;
 
     gid_t groups[4];
     int group_count = 0;
@@ -296,7 +321,7 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     close(pipe_fd[0]);
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    if (waitpid_retry(pid, &status) != 0) return -1;
 
     char *p = trim_str(buf);
     if (p && p[0] != '\0') {
@@ -692,8 +717,15 @@ static int is_lock_stale(void) {
     if (stat(LOCK_DIR, &st) == 0) {
         time_t now = time(NULL);
         if (st.st_mtime > 0 && now > st.st_mtime && (now - st.st_mtime) > 60) return 1;
+        return 0;
     }
-    return 1;
+    return 0;
+}
+
+static int waitpid_retry(pid_t pid, int *status) {
+    pid_t result;
+    do result = waitpid(pid, status, 0); while (result < 0 && errno == EINTR);
+    return result == pid ? 0 : -1;
 }
 
 static void signal_lock_cleanup(int sig) {
@@ -1081,7 +1113,10 @@ static int do_check(void) {
     close(pipefd[0]);
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    if (waitpid_retry(pid, &status) != 0) {
+        log_error("Failed to wait for configuration check: %s", strerror(errno));
+        return 1;
+    }
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         log_error("Configuration validation failed:");
@@ -1217,11 +1252,11 @@ static int stop_service(void) {
     kill(pid, SIGTERM);
 
     for (int i = 0; i < STOP_TIMEOUT; i++) {
-        if (kill(pid, 0) != 0) break;
+        if (check_proc_pid(pid) <= 0) break;
         sleep(1);
     }
 
-    if (kill(pid, 0) == 0) {
+    if (check_proc_pid(pid) > 0) {
         log_info("Process unresponsive (%ds), forcing termination...", STOP_TIMEOUT);
         kill(pid, SIGKILL);
         for (int i = 0; i < 5; i++) {
@@ -1338,7 +1373,7 @@ static int show_version(void) {
         _exit(127);
     }
     int status = 0;
-    waitpid(pid, &status, 0);
+    if (waitpid_retry(pid, &status) != 0) return 1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return 1;
 }
