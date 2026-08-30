@@ -627,11 +627,12 @@ static void prepare_env(void) {
     }
 }
 
-static void remove_lock_dir(void) {
+static int remove_lock_dir(void) {
     char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    unlink(pid_path);
-    rmdir(LOCK_DIR);
+    if (unlink(pid_path) != 0 && errno != ENOENT) return -1;
+    if (rmdir(LOCK_DIR) != 0) return -1;
+    return 0;
 }
 
 static void release_lock(void) {
@@ -646,9 +647,14 @@ static int write_lock_pid(void) {
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
     int fd = open(pid_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return -1;
-    int ok = dprintf(fd, "%d\n", getpid()) >= 0;
-    if (close(fd) != 0) ok = 0;
-    return ok ? 0 : -1;
+    if (dprintf(fd, "%d\n", getpid()) < 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (close(fd) != 0) return -1;
+    return 0;
 }
 
 static int is_lock_stale(void) {
@@ -714,7 +720,11 @@ static void acquire_lock(void) {
             exit(1);
         }
         if (is_lock_stale()) {
-            remove_lock_dir();
+            if (remove_lock_dir() != 0) {
+                int saved_errno = errno;
+                log_error("Failed to remove stale lock directory %s: %s", LOCK_DIR, strerror(saved_errno));
+                exit(1);
+            }
             continue;
         }
         attempts++;
