@@ -45,6 +45,7 @@ typedef struct {
 } Config;
 
 static Config g_cfg;
+static void log_msg(int level, const char *fmt, ...);
 
 #define SERVICE_NAME    g_cfg.service_name
 #define WORK_DIR        g_cfg.work_dir
@@ -70,6 +71,7 @@ static char g_iana_tz[64] = "Asia/Shanghai";
 static pid_t get_pid(void);
 static void clear_pid(void);
 static void release_lock(void);
+static void reset_lock_cleanup_signals(void);
 static int display_status(void);
 static int do_check(void);
 static int start_service(void);
@@ -160,9 +162,18 @@ static int apply_credentials(const char *user_spec) {
         groups[group_count++] = 3004; // AID_NET_RAW
     }
 
-    setgroups(group_count, groups);
-    if (setresgid(target_gid, target_gid, target_gid) != 0) setgid(target_gid);
-    if (setresuid(target_uid, target_uid, target_uid) != 0) setuid(target_uid);
+    if (setgroups(group_count, groups) != 0) {
+        log_msg(1, "setgroups failed: %s", strerror(errno));
+        return -1;
+    }
+    if (setresgid(target_gid, target_gid, target_gid) != 0 && setgid(target_gid) != 0) {
+        log_msg(1, "setgid failed: %s", strerror(errno));
+        return -1;
+    }
+    if (setresuid(target_uid, target_uid, target_uid) != 0 && setuid(target_uid) != 0) {
+        log_msg(1, "setuid failed: %s", strerror(errno));
+        return -1;
+    }
 
     return 0;
 }
@@ -252,6 +263,7 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     }
 
     if (pid == 0) {
+        reset_lock_cleanup_signals();
         close(pipe_fd[0]);
         dup2(pipe_fd[1], STDOUT_FILENO);
         int devnull = open("/dev/null", O_WRONLY);
@@ -629,14 +641,14 @@ static void release_lock(void) {
     }
 }
 
-static void write_lock_pid(void) {
+static int write_lock_pid(void) {
     char pid_path[300];
     snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
     int fd = open(pid_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        dprintf(fd, "%d\n", getpid());
-        close(fd);
-    }
+    if (fd < 0) return -1;
+    int ok = dprintf(fd, "%d\n", getpid()) >= 0;
+    if (close(fd) != 0) ok = 0;
+    return ok ? 0 : -1;
 }
 
 static int is_lock_stale(void) {
@@ -683,9 +695,24 @@ static void signal_lock_cleanup(int sig) {
     _exit(128 + sig);
 }
 
+static void reset_lock_cleanup_signals(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+}
+
 static void acquire_lock(void) {
     int attempts = 0;
     while (mkdir(LOCK_DIR, 0755) != 0) {
+        if (errno != EEXIST) {
+            log_error("Failed to create lock directory %s: %s", LOCK_DIR, strerror(errno));
+            exit(1);
+        }
         if (is_lock_stale()) {
             remove_lock_dir();
             continue;
@@ -697,7 +724,11 @@ static void acquire_lock(void) {
         }
         sleep(1);
     }
-    write_lock_pid();
+    if (write_lock_pid() != 0) {
+        log_error("Failed to initialize lock PID file in %s: %s", LOCK_DIR, strerror(errno));
+        remove_lock_dir();
+        exit(1);
+    }
     g_lock_acquired = 1;
     atexit(release_lock);
 
@@ -1013,6 +1044,7 @@ static int do_check(void) {
     }
 
     if (pid == 0) {
+        reset_lock_cleanup_signals();
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
@@ -1093,6 +1125,7 @@ static int start_service(void) {
     }
 
     if (pid == 0) {
+        reset_lock_cleanup_signals();
         setsid();
         if (chdir(WORK_DIR) != 0) _exit(127);
 
@@ -1116,7 +1149,7 @@ static int start_service(void) {
 
         if (g_iana_tz[0] != '\0') setenv("TZ", g_iana_tz, 1);
 
-        apply_credentials(RUN_USER);
+        if (apply_credentials(RUN_USER) != 0) _exit(126);
         execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
         _exit(127);
     }
@@ -1290,6 +1323,7 @@ static int show_version(void) {
         return 1;
     }
     if (pid == 0) {
+        reset_lock_cleanup_signals();
         execl(BIN_PATH, BIN_PATH, "version", (char *)NULL);
         _exit(127);
     }
