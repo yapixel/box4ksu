@@ -66,7 +66,6 @@ static void log_msg(int level, const char *fmt, ...);
 #define NOFILE_LIMIT    g_cfg.nofile_limit
 
 static int g_lock_acquired = 0;
-static long g_tz_offset_sec = 28800; // Default +8h (CST UTC+8)
 static char g_iana_tz[64] = "Asia/Shanghai";
 
 static pid_t get_pid(void);
@@ -85,7 +84,7 @@ static int reload_service(void);
 
 static char *trim_str(char *str) {
     if (!str) return NULL;
-    while (isspace((unsigned char)*str) || *str == '"' || *str == '\'' || *str == '[' || *str == ']') str++;
+    while (*str && (isspace((unsigned char)*str) || *str == '"' || *str == '\'' || *str == '[' || *str == ']')) str++;
     if (*str == '\0') return str;
     char *end = str + strlen(str) - 1;
     while (end > str && (isspace((unsigned char)*end) || *end == '"' || *end == '\'' || *end == '[' || *end == ']' || *end == '\r' || *end == '\n')) end--;
@@ -147,6 +146,13 @@ static int resolve_gid(const char *name, gid_t *out) {
     else if (parse_id(name, (unsigned long)((gid_t)-1), &value) != 0) return -1;
     *out = (gid_t)value;
     return 0;
+}
+
+static int apply_nofile_limit(void) {
+    struct rlimit rl = {(rlim_t)NOFILE_LIMIT, (rlim_t)NOFILE_LIMIT};
+    if (setrlimit(RLIMIT_NOFILE, &rl) == 0) return 0;
+    log_msg(1, "setrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
+    return -1;
 }
 
 static int apply_credentials(const char *user_spec) {
@@ -233,22 +239,43 @@ static void expand_vars(char *dst, size_t dst_size, const char *src) {
     snprintf(dst, dst_size, "%s", temp);
 }
 
-static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir, int *has_workdir) {
+static void strip_inline_comment(char *value) {
+    char quote = '\0';
+    for (char *p = value; *p; p++) {
+        if ((*p == '\'' || *p == '"') && (p == value || p[-1] != '\\')) {
+            if (quote == '\0') quote = *p;
+            else if (quote == *p) quote = '\0';
+        } else if (quote == '\0' && (*p == '#' || *p == ';')) {
+            *p = '\0';
+            return;
+        }
+    }
+}
+
+static int parse_long_value(const char *key, const char *value, long min, long max, long *out) {
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < min || parsed > max) {
+        fprintf(stderr, "Invalid value for %s: %s (expected %ld..%ld)\n", key, value, min, max);
+        return -1;
+    }
+    *out = parsed;
+    return 0;
+}
+
+static int parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir, int *has_workdir) {
     line = trim_str(line);
-    if (!line || line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return;
+    if (!line || line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return 0;
 
     char *eq = strchr(line, '=');
-    if (!eq) return;
+    if (!eq) return 0;
 
     *eq = '\0';
     char *key = trim_str(line);
-    char *val = trim_str(eq + 1);
-
-    char *comment = strpbrk(val, "#;");
-    if (comment) {
-        *comment = '\0';
-        val = trim_str(val);
-    }
+    char *raw_val = eq + 1;
+    strip_inline_comment(raw_val);
+    char *val = trim_str(raw_val);
 
     char exp_val[256];
     expand_vars(exp_val, sizeof(exp_val), val);
@@ -264,11 +291,22 @@ static void parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logd
     else if (strcasecmp(key, "lock_dir") == 0) { snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.255s", exp_val); *has_lockdir = 1; }
     else if (strcasecmp(key, "run_user") == 0) snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%.63s", exp_val);
     else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%.63s", exp_val);
-    else if (strcasecmp(key, "max_log_size") == 0) g_cfg.max_log_size = atol(exp_val);
-    else if (strcasecmp(key, "stop_timeout") == 0) g_cfg.stop_timeout = atoi(exp_val);
-    else if (strcasecmp(key, "start_timeout") == 0) g_cfg.start_timeout = atoi(exp_val);
-    else if (strcasecmp(key, "check_config") == 0) g_cfg.check_config = atoi(exp_val);
-    else if (strcasecmp(key, "nofile_limit") == 0) g_cfg.nofile_limit = atol(exp_val);
+    else if (strcasecmp(key, "max_log_size") == 0) return parse_long_value(key, exp_val, 1, LONG_MAX, &g_cfg.max_log_size);
+    else if (strcasecmp(key, "stop_timeout") == 0) {
+        long parsed;
+        if (parse_long_value(key, exp_val, 0, 3600, &parsed) != 0) return -1;
+        g_cfg.stop_timeout = (int)parsed;
+    } else if (strcasecmp(key, "start_timeout") == 0) {
+        long parsed;
+        if (parse_long_value(key, exp_val, 1, 3600, &parsed) != 0) return -1;
+        g_cfg.start_timeout = (int)parsed;
+    } else if (strcasecmp(key, "check_config") == 0) {
+        long parsed;
+        if (parse_long_value(key, exp_val, 0, 1, &parsed) != 0) return -1;
+        g_cfg.check_config = (int)parsed;
+    } else if (strcasecmp(key, "nofile_limit") == 0) return parse_long_value(key, exp_val, 1, LONG_MAX, &g_cfg.nofile_limit);
+
+    return 0;
 }
 
 // ================= Android Property & Timezone =================
@@ -331,69 +369,6 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     return -1;
 }
 
-static long parse_offset_string(const char *s) {
-    if (!s || s[0] == '\0') return 0;
-    while (isspace((unsigned char)*s)) s++;
-    if (strncasecmp(s, "UTC", 3) == 0 || strncasecmp(s, "GMT", 3) == 0) s += 3;
-    while (isspace((unsigned char)*s)) s++;
-
-    int sign = 1;
-    if (*s == '+') { sign = 1; s++; }
-    else if (*s == '-') { sign = -1; s++; }
-    else if (isdigit((unsigned char)*s)) { sign = 1; }
-    else return 0;
-
-    int hours = 0, mins = 0;
-    char *colon = strchr(s, ':');
-    if (colon) {
-        hours = atoi(s);
-        mins = atoi(colon + 1);
-    } else {
-        int val = atoi(s);
-        if (strlen(s) >= 3 || val >= 100 || val <= -100) {
-            hours = abs(val) / 100;
-            mins = abs(val) % 100;
-        } else {
-            hours = abs(val);
-            mins = 0;
-        }
-    }
-    return sign * ((long)hours * 3600 + (long)mins * 60);
-}
-
-static long get_tz_offset_from_name(const char *tz_name) {
-    if (!tz_name || tz_name[0] == '\0') return 28800;
-
-    static const struct { const char *name; long offset; } tz_tbl[] = {
-        {"Asia/Shanghai", 28800}, {"Asia/Chongqing", 28800}, {"Asia/Harbin", 28800},
-        {"Asia/Urumqi", 28800}, {"Asia/Kashgar", 28800}, {"Asia/Hong_Kong", 28800},
-        {"Asia/Macau", 28800}, {"Asia/Taipei", 28800}, {"Asia/Singapore", 28800},
-        {"Asia/Kuala_Lumpur", 28800}, {"Asia/Manila", 28800}, {"Asia/Perth", 28800},
-        {"Asia/Brunei", 28800}, {"Asia/Makassar", 28800}, {"PRC", 28800},
-        {"China", 28800}, {"CST", 28800}, {"CST-8", 28800}, {"Etc/GMT-8", 28800},
-        {"Asia/Tokyo", 32400}, {"Asia/Seoul", 32400}, {"JST", 32400}, {"KST", 32400},
-        {"Asia/Bangkok", 25200}, {"Asia/Jakarta", 25200}, {"Asia/Ho_Chi_Minh", 25200},
-        {"Asia/Kolkata", 19800}, {"Asia/Calcutta", 19800}, {"IST", 19800},
-        {"Asia/Dubai", 14400}, {"GST", 14400},
-        {"Europe/London", 0}, {"UTC", 0}, {"GMT", 0}, {"Zulu", 0}, {"Etc/UTC", 0},
-        {"Europe/Berlin", 3600}, {"Europe/Paris", 3600}, {"Europe/Rome", 3600},
-        {"CET", 3600}, {"America/New_York", -18000}, {"EST", -18000},
-        {"America/Chicago", -21600}, {"CDT", -21600},
-        {"America/Denver", -25200}, {"MST", -25200},
-        {"America/Los_Angeles", -28800}, {"PST", -28800},
-        {NULL, 0}
-    };
-
-    for (int i = 0; tz_tbl[i].name != NULL; i++) {
-        if (strcasecmp(tz_name, tz_tbl[i].name) == 0) return tz_tbl[i].offset;
-    }
-
-    if (strchr(tz_name, '+') || strchr(tz_name, '-') || strncasecmp(tz_name, "UTC", 3) == 0 || strncasecmp(tz_name, "GMT", 3) == 0) {
-        return parse_offset_string(tz_name);
-    }
-    return 28800;
-}
-
 static void init_timezone(const char *custom_tz) {
     char tz_buf[64] = {0};
     
@@ -427,11 +402,11 @@ static void init_timezone(const char *custom_tz) {
         }
     }
 
-    g_tz_offset_sec = get_tz_offset_from_name(g_iana_tz);
     setenv("TZ", g_iana_tz, 1);
+    tzset();
 }
 
-static void load_config(void) {
+static int load_config(void) {
     snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "sing-box");
     g_cfg.work_dir[0] = '\0';
     snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "root:net_admin");
@@ -474,11 +449,14 @@ static void load_config(void) {
                     if (line_truncated) {
                         fprintf(stderr, "Configuration line too long in %s\n", candidates[i]);
                         close(fd);
-                        return;
+                        return -1;
                     }
                     if (lpos > 0) {
                         line[lpos] = '\0';
-                        parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+                        if (parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir) != 0) {
+                            close(fd);
+                            return -1;
+                        }
                         lpos = 0;
                     }
                 } else if (lpos < (int)sizeof(line) - 1) {
@@ -488,14 +466,22 @@ static void load_config(void) {
                 }
             }
         }
+        if (n < 0) {
+            fprintf(stderr, "Failed to read configuration %s: %s\n", candidates[i], strerror(errno));
+            close(fd);
+            return -1;
+        }
         if (line_truncated) {
             fprintf(stderr, "Configuration line too long in %s\n", candidates[i]);
             close(fd);
-            return;
+            return -1;
         }
         if (lpos > 0) {
             line[lpos] = '\0';
-            parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir);
+            if (parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir) != 0) {
+                close(fd);
+                return -1;
+            }
         }
         close(fd);
         if (found) break;
@@ -527,15 +513,15 @@ static void load_config(void) {
     if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.240s/.box.lock", g_cfg.work_dir);
 
     init_timezone(g_cfg.timezone);
+    return 0;
 }
 
 // ================= Logging System =================
 
 static void ts(char *buffer, size_t size) {
     time_t now = time(NULL);
-    time_t local_now = now + g_tz_offset_sec;
     struct tm tm_info;
-    gmtime_r(&local_now, &tm_info);
+    localtime_r(&now, &tm_info);
     snprintf(buffer, size, "%04d-%02d-%02d %02d:%02d:%02d",
              (tm_info.tm_year + 1900) % 10000, tm_info.tm_mon + 1, tm_info.tm_mday,
              tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
@@ -600,28 +586,47 @@ static void show_tail(const char *filepath, int lines) {
     }
 
     char buf[8192];
-    off_t read_size = (file_size > (off_t)(sizeof(buf) - 1)) ? (off_t)(sizeof(buf) - 1) : file_size;
-    lseek(fd, file_size - read_size, SEEK_SET);
-
-    ssize_t bytes = read(fd, buf, read_size);
-    if (bytes <= 0) bytes = 0;
-    buf[bytes] = '\0';
-    close(fd);
-
+    off_t position = file_size;
+    off_t start_offset = 0;
     int count = 0;
-    char *start = buf + bytes;
-    while (start > buf) {
-        start--;
-        if (*start == '\n' && start != buf + bytes - 1) {
-            count++;
-            if (count >= lines) {
-                start++;
-                break;
+    int found = 0;
+
+    while (position > 0 && !found) {
+        size_t chunk = position > (off_t)sizeof(buf) ? sizeof(buf) : (size_t)position;
+        position -= (off_t)chunk;
+        if (lseek(fd, position, SEEK_SET) < 0) break;
+        ssize_t bytes = read(fd, buf, chunk);
+        if (bytes <= 0) break;
+
+        for (ssize_t i = bytes - 1; i >= 0; i--) {
+            off_t absolute = position + i;
+            if (buf[i] == '\n' && absolute != file_size - 1) {
+                count++;
+                if (count >= lines) {
+                    start_offset = absolute + 1;
+                    found = 1;
+                    break;
+                }
             }
         }
     }
-    printf("%s", start);
-    if (bytes > 0 && buf[bytes - 1] != '\n') printf("\n");
+
+    if (lseek(fd, start_offset, SEEK_SET) >= 0) {
+        ssize_t bytes;
+        char last = '\n';
+        while ((bytes = read(fd, buf, sizeof(buf))) > 0) {
+            last = buf[bytes - 1];
+            size_t written = 0;
+            while (written < (size_t)bytes) {
+                ssize_t n = write(STDOUT_FILENO, buf + written, (size_t)bytes - written);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                written += (size_t)n;
+            }
+        }
+        if (last != '\n') write(STDOUT_FILENO, "\n", 1);
+    }
+    close(fd);
 }
 
 // ================= Process & Lock Management =================
@@ -938,9 +943,13 @@ static int display_status(void) {
 
     log_info("%s service is running (PID: %d)", SERVICE_NAME, pid);
     if (g_iana_tz[0] != '\0') {
-        int off_h = abs((int)(g_tz_offset_sec / 3600));
-        int off_m = abs((int)((g_tz_offset_sec % 3600) / 60));
-        char sign = (g_tz_offset_sec >= 0) ? '+' : '-';
+        time_t now = time(NULL);
+        struct tm local_tm;
+        localtime_r(&now, &local_tm);
+        long offset = local_tm.tm_gmtoff;
+        int off_h = abs((int)(offset / 3600));
+        int off_m = abs((int)((offset % 3600) / 60));
+        char sign = offset >= 0 ? '+' : '-';
         log_info("Timezone: %s (UTC%c%02d:%02d)", g_iana_tz, sign, off_h, off_m);
     }
 
@@ -1091,6 +1100,7 @@ static int do_check(void) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+        if (chdir(WORK_DIR) != 0 || apply_nofile_limit() != 0 || apply_credentials(RUN_USER) != 0) _exit(126);
         execl(BIN_PATH, BIN_PATH, "check", "-D", WORK_DIR, (char *)NULL);
         _exit(127);
     }
@@ -1174,10 +1184,7 @@ static int start_service(void) {
         setsid();
         if (chdir(WORK_DIR) != 0) _exit(127);
 
-        struct rlimit rl;
-        rl.rlim_cur = NOFILE_LIMIT;
-        rl.rlim_max = NOFILE_LIMIT;
-        setrlimit(RLIMIT_NOFILE, &rl);
+        if (apply_nofile_limit() != 0) _exit(125);
 
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd >= 0) {
@@ -1393,7 +1400,7 @@ static void usage(const char *prog_name) {
 }
 
 int main(int argc, char *argv[]) {
-    load_config();
+    if (load_config() != 0) return 1;
 
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "help") == 0)) {
         usage(argv[0]);
