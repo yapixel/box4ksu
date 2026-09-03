@@ -1,8 +1,8 @@
 {
-  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "$schema": "https://raw.githubusercontent.com/reF1nd/sing-box/reF1nd-testing-next/docs/schema.json",
   "log": {
     "disabled": false,
-    "level": "error",
+    "level": "info",
     "output": "sing-box.log",
     "timestamp": true
   },
@@ -55,29 +55,14 @@
     "servers": [
       {
         "tag": "dns-proxy",
-        "type": "https",
-        "server": "cloudflare-dns.com",
-        "domain_resolver": "dns-hosts",
+        "type": "tls",
+        "server": "1.1.1.1",
         "detour": "Proxy"
       },
       {
         "tag": "dns-direct",
-        "type": "group",
-        "servers": [
-          "ali-doh",
-          "tencent-doh"
-        ]
-      },
-      {
-        "tag": "ali-doh",
         "type": "https",
         "server": "dns.alidns.com",
-        "domain_resolver": "dns-hosts"
-      },
-      {
-        "tag": "tencent-doh",
-        "type": "https",
-        "server": "doh.pub",
         "domain_resolver": "dns-hosts"
       },
       {
@@ -91,10 +76,6 @@
           "doh.pub": [
             "120.53.53.53",
             "1.12.12.12"
-          ],
-          "cloudflare-dns.com": [
-            "1.1.1.1",
-            "1.0.0.1"
           ]
         }
       }
@@ -139,6 +120,16 @@
       },
       {
         "rule_set": [
+          "geosite/openai",
+          "geosite/anthropic",
+          "geosite/google",
+          "geosite/google-cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "rule_set": [
           "geosite/alibaba",
           "geosite/category-games@cn",
           "geosite/apple-cn",
@@ -154,6 +145,14 @@
         ],
         "action": "route",
         "server": "dns-proxy"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
       }
     ],
     "final": "dns-proxy",
@@ -164,17 +163,25 @@
   },
   "inbounds": [
     {
-      "type": "tun",
-      "tag": "tun-in",
-      "address": [
-        "172.19.0.1/30",
-        "fdfe:dcba:9876::1/126"
+      "type": "ebpf",
+      "tag": "ebpf-in",
+      "mode": "hybrid",
+      "bypass_rule_set": [
+        "geoip/cn"
       ],
-      "mtu": 1500,
-      "stack": "system",
-      "auto_route": true,
-      "strict_route": true,
-      "endpoint_independent_nat": true
+      "local": {
+        "dns_mode": "respect_policy",
+        "ipv6_mode": "auto",
+        "include_package": [],
+        "exclude_package": []
+      },
+      "shared": {
+        "dns_mode": "respect_policy",
+        "interface": [
+          "wlan2"
+        ],
+        "ipv6_mode": "always"
+      }
     }
   ],
   "http_clients": [
@@ -188,10 +195,6 @@
     }
   ],
   "outbounds": [
-    {
-      "tag": "bridge-out",
-      "type": "bridge"
-    },
     {
       "tag": "direct",
       "type": "direct"
@@ -264,10 +267,70 @@
       "type": "selector",
       "tag": "AI",
       "outbounds": [
+        "ChatGPT",
+        "Claude",
+        "Gemini",
+        "Copilot",
+        "Grok",
         "Singapore",
         "Taiwan",
         "Japan",
         "US"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "ChatGPT",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Claude",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Gemini",
+      "outbounds": [
+        "US",
+        "Taiwan",
+        "Japan",
+        "Singapore",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Copilot",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Grok",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
       ]
     },
     {
@@ -321,11 +384,11 @@
       {
         "tag": "AWAvenue-Ads",
         "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.srs",
+        "format": "source",
+        "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json",
         "http_client": "detour_proxy",
         "update_interval": "24h",
-        "path": "./rule_set/Ads_AWAvenue.srs"
+        "path": "./rule_set/Ads_AWAvenue.json"
       },
       {
         "tag": [
@@ -347,7 +410,10 @@
           "geosite/youtube",
           "geosite/hulu",
           "geoip/telegram",
-          "geoip/cn"
+          "geoip/cn",
+          "geosite/google-gemini",
+          "geosite/github-copilot",
+          "geosite/xai"
         ],
         "type": "remote",
         "format": "binary",
@@ -375,10 +441,6 @@
         "action": "hijack-dns"
       },
       {
-        "protocol": "quic",
-        "action": "reject"
-      },
-      {
         "clash_mode": "Direct",
         "action": "route",
         "outbound": "direct"
@@ -394,27 +456,6 @@
         ],
         "action": "route",
         "outbound": "HOME-SS"
-      },
-      {
-        "process_name": [
-          "Weixin.exe",
-          "WeChat.exe",
-          "WeChatAppEx.exe",
-          "QQ.exe",
-          "DingTalk.exe",
-          "wemeetapp.exe",
-          "BaiduNetdiskUnite.exe",
-          "BaiduNetdisk.exe",
-          "Thunder.exe",
-          "cloudmusic.exe",
-          "QQMusic.exe",
-          "ToDesk.exe",
-          "SunloginClient.exe",
-          "TeamViewer.exe",
-          "Steam.exe"
-        ],
-        "action": "route",
-        "outbound": "direct"
       },
       {
         "domain": [
@@ -443,6 +484,39 @@
         "action": "reject"
       },
       {
+        "rule_set": "geosite/anthropic",
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "rule_set": "geosite/openai",
+        "action": "route",
+        "outbound": "ChatGPT"
+      },
+      {
+        "rule_set": "geosite/google-gemini",
+        "action": "route",
+        "outbound": "Gemini"
+      },
+      {
+        "rule_set": "geosite/github-copilot",
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "rule_set": "geosite/xai",
+        "action": "route",
+        "outbound": "Grok"
+      },
+      {
         "domain": [
           "dl.google.com",
           "www.gstatic.com"
@@ -453,14 +527,6 @@
         ],
         "action": "route",
         "outbound": "US"
-      },
-      {
-        "rule_set": [
-          "geosite/openai",
-          "geosite/anthropic"
-        ],
-        "action": "route",
-        "outbound": "AI"
       },
       {
         "rule_set": "geosite/netflix",
