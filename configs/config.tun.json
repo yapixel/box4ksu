@@ -154,6 +154,14 @@
         ],
         "action": "route",
         "server": "dns-proxy"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
       }
     ],
     "final": "dns-proxy",
@@ -264,10 +272,70 @@
       "type": "selector",
       "tag": "AI",
       "outbounds": [
+        "ChatGPT",
+        "Claude",
+        "Gemini",
+        "Copilot",
+        "Grok",
         "Singapore",
         "Taiwan",
         "Japan",
         "US"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "ChatGPT",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Claude",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Gemini",
+      "outbounds": [
+        "US",
+        "Taiwan",
+        "Japan",
+        "Singapore",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Copilot",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "Grok",
+      "outbounds": [
+        "US",
+        "Japan",
+        "Singapore",
+        "Taiwan",
+        "Proxy"
       ]
     },
     {
@@ -347,7 +415,10 @@
           "geosite/youtube",
           "geosite/hulu",
           "geoip/telegram",
-          "geoip/cn"
+          "geoip/cn",
+          "geosite/google-gemini",
+          "geosite/github-copilot",
+          "geosite/xai"
         ],
         "type": "remote",
         "format": "binary",
@@ -443,6 +514,39 @@
         "action": "reject"
       },
       {
+        "rule_set": "geosite/anthropic",
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "rule_set": "geosite/openai",
+        "action": "route",
+        "outbound": "ChatGPT"
+      },
+      {
+        "rule_set": "geosite/google-gemini",
+        "action": "route",
+        "outbound": "Gemini"
+      },
+      {
+        "rule_set": "geosite/github-copilot",
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "rule_set": "geosite/xai",
+        "action": "route",
+        "outbound": "Grok"
+      },
+      {
         "domain": [
           "dl.google.com",
           "www.gstatic.com"
@@ -453,14 +557,6 @@
         ],
         "action": "route",
         "outbound": "US"
-      },
-      {
-        "rule_set": [
-          "geosite/openai",
-          "geosite/anthropic"
-        ],
-        "action": "route",
-        "outbound": "AI"
       },
       {
         "rule_set": "geosite/netflix",

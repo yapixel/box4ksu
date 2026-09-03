@@ -45,7 +45,7 @@ mkdir -p /data/adb/sing-box/{bin,logs}
 
 # 复制文件
 cp sing-box /data/adb/sing-box/bin/
-cp config.json /data/adb/sing-box/
+cp configs/config.tun.json /data/adb/sing-box/config.json  # 或选择 configs/ 中的其他模式
 cp box /data/adb/sing-box/
 cp box.ini /data/adb/sing-box/
 

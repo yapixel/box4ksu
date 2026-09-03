@@ -1,0 +1,479 @@
+{
+  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "hosts",
+        "type": "hosts",
+        "predefined": {
+          "dns.alidns.com": [
+            "223.5.5.5",
+            "223.6.6.6"
+          ],
+          "dns.google": [
+            "8.8.8.8",
+            "8.8.4.4"
+          ]
+        }
+      },
+      {
+        "tag": "ali-doh",
+        "type": "https",
+        "server": "dns.alidns.com",
+        "domain_resolver": "hosts"
+      },
+      {
+        "tag": "google-doh",
+        "type": "https",
+        "server": "dns.google",
+        "domain_resolver": "hosts",
+        "detour": "Proxy"
+      },
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "query_type": "AAAA"
+          },
+          {
+            "default_interface_address": "2000::/3",
+            "invert": true
+          }
+        ],
+        "action": "reject"
+      },
+      {
+        "query_type": [
+          "SVCB",
+          "HTTPS"
+        ],
+        "action": "predefined",
+        "rcode": "NOERROR"
+      },
+      {
+        "rule_set": [
+          "adblock",
+          "BlockHttpDNS"
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          ".local",
+          ".lan",
+          ".home",
+          "router.asus.com",
+          "tplinkwifi.net",
+          "miwifi.com"
+        ],
+        "action": "route",
+        "server": "local"
+      },
+      {
+        "clash_mode": "Direct",
+        "action": "route",
+        "server": "ali-doh"
+      },
+      {
+        "clash_mode": "Global",
+        "action": "route",
+        "server": "google-doh"
+      },
+      {
+        "rule_set": [
+          "apple@cn",
+          "cn",
+          "steam@cn"
+        ],
+        "action": "route",
+        "server": "ali-doh"
+      },
+      {
+        "rule_set": [
+          "openai",
+          "anthropic",
+          "google-gemini",
+          "github-copilot",
+          "xai",
+          "telegram",
+          "youtube",
+          "netflix",
+          "geolocation-!cn"
+        ],
+        "action": "route",
+        "server": "google-doh"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "server": "google-doh"
+      }
+    ],
+    "final": "google-doh",
+    "strategy": "prefer_ipv4",
+    "cache_capacity": 8192,
+    "optimistic": {
+      "enabled": true,
+      "timeout": "5m0s"
+    }
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7080
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "platform": {
+        "http_proxy": {
+          "enabled": true,
+          "server": "127.0.0.1",
+          "server_port": 7080
+        }
+      },
+      "route_exclude_address": [
+        "17.0.0.0/8"
+      ],
+      "stack": "mixed",
+      "auto_route": true,
+      "strict_route": false,
+      "endpoint_independent_nat": true,
+      "mtu": 1500
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "Proxy",
+      "type": "selector",
+      "outbounds": [
+        "Direct"
+      ],
+      "default": "Direct",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "ChatGPT",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Claude",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Gemini",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Copilot",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Grok",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Telegram",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Media",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Final",
+      "type": "selector",
+      "outbounds": [
+        "Proxy",
+        "Direct"
+      ],
+      "default": "Proxy",
+      "interrupt_exist_connections": true
+    },
+    {
+      "tag": "Direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "port": 53
+          },
+          {
+            "protocol": "dns"
+          }
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "clash_mode": "Global",
+        "action": "route",
+        "outbound": "Proxy"
+      },
+      {
+        "clash_mode": "Direct",
+        "action": "route",
+        "outbound": "Direct"
+      },
+      {
+        "protocol": "ntp",
+        "action": "route",
+        "outbound": "Direct"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "Direct"
+      },
+      {
+        "action": "sniff",
+        "sniffer": [
+          "http",
+          "tls",
+          "quic",
+          "dns"
+        ],
+        "timeout": "100ms"
+      },
+      {
+        "rule_set": [
+          "adblock",
+          "BlockHttpDNS"
+        ],
+        "action": "reject"
+      },
+      {
+        "rule_set": [
+          "anthropic"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "rule_set": [
+          "openai"
+        ],
+        "action": "route",
+        "outbound": "ChatGPT"
+      },
+      {
+        "rule_set": [
+          "google-gemini"
+        ],
+        "action": "route",
+        "outbound": "Gemini"
+      },
+      {
+        "rule_set": [
+          "github-copilot"
+        ],
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "domain_suffix": [
+          "copilot.microsoft.com",
+          "sydney.bing.com"
+        ],
+        "action": "route",
+        "outbound": "Copilot"
+      },
+      {
+        "rule_set": [
+          "xai"
+        ],
+        "action": "route",
+        "outbound": "Grok"
+      },
+      {
+        "rule_set": [
+          "apple@cn",
+          "cn",
+          "steam@cn"
+        ],
+        "action": "route",
+        "outbound": "Direct"
+      },
+      {
+        "rule_set": [
+          "geolocation-!cn",
+          "telegram",
+          "telegram_ip",
+          "youtube",
+          "netflix"
+        ],
+        "protocol": [
+          "quic",
+          "stun"
+        ],
+        "action": "reject",
+        "no_drop": true
+      },
+      {
+        "rule_set": [
+          "youtube",
+          "netflix"
+        ],
+        "action": "route",
+        "outbound": "Media"
+      },
+      {
+        "rule_set": [
+          "telegram",
+          "telegram_ip"
+        ],
+        "action": "route",
+        "outbound": "Telegram"
+      },
+      {
+        "rule_set": [
+          "geolocation-!cn"
+        ],
+        "action": "route",
+        "outbound": "Proxy"
+      },
+      {
+        "action": "resolve"
+      },
+      {
+        "rule_set": "cn_ip",
+        "action": "route",
+        "outbound": "Direct"
+      },
+      {
+        "network": "udp",
+        "port": 443,
+        "action": "reject",
+        "no_drop": true
+      }
+    ],
+    "auto_detect_interface": true,
+    "default_domain_resolver": "ali-doh",
+    "final": "Final",
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "BlockHttpDNS",
+        "format": "binary",
+        "url": "https://cdn.jsdelivr.net/gh/senshinya/singbox_ruleset@main/rule/BlockHttpDNS/BlockHttpDNS.srs",
+        "update_interval": "48h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": [
+          "apple@cn",
+          "cn",
+          "telegram",
+          "youtube",
+          "netflix",
+          "steam@cn",
+          "geolocation-!cn",
+          "openai",
+          "anthropic",
+          "google-gemini",
+          "github-copilot",
+          "xai"
+        ],
+        "format": "binary",
+        "url": "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/{tag}.srs",
+        "update_interval": "48h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "adblock",
+        "format": "binary",
+        "url": "https://cdn.jsdelivr.net/gh/217heidai/adblockfilters@main/rules/adblocksingbox.srs",
+        "update_interval": "48h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "telegram_ip",
+        "format": "binary",
+        "url": "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs",
+        "update_interval": "48h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "cn_ip",
+        "format": "binary",
+        "url": "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs",
+        "update_interval": "48h0m0s"
+      }
+    ]
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_fakeip": false,
+      "store_dns": true
+    }
+  }
+}
