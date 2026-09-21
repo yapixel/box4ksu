@@ -1,0 +1,37 @@
+{
+ "inbounds": [
+    {
+      "type": "ebpf",
+      "tag": "ebpf-in",
+      "bypass_rule_set": [
+        "geoip-cn"
+      ],
+      "local": {
+        "enabled": true,
+        "data_plane": "tc",
+        "dns_mode": "respect_policy",
+        "ipv6": true,
+        "bypass_private_address": true,
+        "endpoint_connected_bypass": {
+          "enabled": true,
+          "ip_cidr": ["162.120.128.0/17", "162.159.193.0/24", "2606:4700:100::/48"],
+          "port": [500, 2408, 4500]
+         },
+        "include_package": [],
+        "exclude_package": []
+      },
+      "shared": {
+        "enabled": true,
+        "data_plane": "packet_rewrite",
+        "dns_mode": "respect_policy",
+        "interface": [
+          "wlan0",
+          "ap_br_wlan2",
+          "wlan2"
+         ],
+        "bypass_private_address": true,
+        "ipv6": true
+      }
+    }
+  ]
+}
