@@ -37,8 +37,17 @@ jobs:
           # 1. Compile native pure static binary
           zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
           chmod 755 box
+          echo "=== file ==="
           file box
-          ls -lh box
+          echo "=== readelf -h ==="
+          readelf -h box || true
+          echo "=== readelf -l ==="
+          readelf -l box || true
+          echo "=== readelf -d ==="
+          readelf -d box || true
+          echo "=== size ==="
+          size box || true
+          echo "=== sha256sum ==="
           sha256sum box
 
           # 2. Package tarball where internal files are strictly box, box.ini, box-service.sh
@@ -57,15 +66,76 @@ jobs:
           name: box-${{ matrix.arch }}
           path: box-${{ matrix.arch }}.tar.gz
 
-      - name: Upload Android ARM64 standalone binary
+      - name: Upload musl static binary
         if: matrix.arch == 'arm64'
         uses: actions/upload-artifact@v7
         with:
-          name: box-android-arm64
+          name: box-musl-static
           path: box
 
+  bionic-build:
+    name: build (aarch64-linux-android, bionic)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Locate Android NDK
+        run: |
+          MIN_API="26"
+          echo "MIN_API=${MIN_API}" >> $GITHUB_ENV
+          if [ -n "$ANDROID_NDK_LATEST_HOME" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
+            NDK_DIR="$ANDROID_NDK_LATEST_HOME"
+          elif [ -n "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_NDK_HOME" ]; then
+            NDK_DIR="$ANDROID_NDK_HOME"
+          elif [ -n "$ANDROID_NDK_ROOT" ] && [ -d "$ANDROID_NDK_ROOT" ]; then
+            NDK_DIR="$ANDROID_NDK_ROOT"
+          elif [ -d "$ANDROID_HOME/ndk" ]; then
+            NDK_DIR=$(ls -d "$ANDROID_HOME/ndk"/* | tail -n 1)
+          else
+            echo "Error: Android NDK directory not found" >&2
+            exit 1
+          fi
+          echo "Using Android NDK: ${NDK_DIR}"
+          TOOLCHAIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64"
+          CC="${TOOLCHAIN}/bin/aarch64-linux-android${MIN_API}-clang"
+          if [ ! -x "$CC" ]; then
+            echo "Error: Compiler ${CC} not found or not executable" >&2
+            exit 1
+          fi
+          echo "NDK_DIR=${NDK_DIR}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=${TOOLCHAIN}" >> $GITHUB_ENV
+          echo "CC=${CC}" >> $GITHUB_ENV
+
+      - name: Build Android Bionic binary
+        run: |
+          $CC -Wall -Wextra -Wpedantic -Oz -o box box.c
+          chmod 755 box
+          cp box box-bionic
+
+          echo "=== file ==="
+          file box
+          echo "=== readelf -h ==="
+          readelf -h box
+          echo "=== readelf -l ==="
+          readelf -l box
+          echo "=== readelf -d ==="
+          readelf -d box
+          echo "=== size ==="
+          size box
+          echo "=== sha256sum ==="
+          sha256sum box
+
+      - name: Upload Android Bionic binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: box-android-bionic
+          path: |
+            box
+            box-bionic
+
   release:
-    needs: build
+    needs: [build, bionic-build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
