@@ -36,8 +36,10 @@ jobs:
         run: |
           # 1. Compile native pure static binary
           zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
+          chmod 755 box
           file box
           ls -lh box
+          sha256sum box
 
           # 2. Package tarball where internal files are strictly box, box.ini, box-service.sh
           mkdir -p pkg
@@ -54,6 +56,13 @@ jobs:
         with:
           name: box-${{ matrix.arch }}
           path: box-${{ matrix.arch }}.tar.gz
+
+      - name: Upload Android ARM64 standalone binary
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: box-android-arm64
+          path: box
 
   release:
     needs: build

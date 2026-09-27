@@ -12,6 +12,8 @@
 #include <stdarg.h>
 #include <grp.h>
 #include <ctype.h>
+#include <sys/file.h>
+#include <stddef.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -28,14 +30,14 @@ struct linux_dirent64 {
 
 typedef struct {
     char service_name[64];
-    char work_dir[256];
-    char bin_path[256];
-    char pid_file[256];
-    char log_dir[256];
-    char log_file[256];
-    char error_log[256];
-    char singbox_log[256];
-    char lock_dir[256];
+    char work_dir[PATH_MAX];
+    char bin_path[PATH_MAX];
+    char pid_file[PATH_MAX];
+    char log_dir[PATH_MAX];
+    char log_file[PATH_MAX];
+    char error_log[PATH_MAX];
+    char singbox_log[PATH_MAX];
+    char lock_dir[PATH_MAX];
     char run_user[64];
     char timezone[64];
     long max_log_size;
@@ -65,9 +67,11 @@ static void log_msg(int level, const char *fmt, ...);
 #define CHECK_CONFIG    g_cfg.check_config
 #define NOFILE_LIMIT    g_cfg.nofile_limit
 
-static int g_lock_acquired = 0;
-static char g_iana_tz[64] = "Asia/Shanghai";
+static int g_lock_fd = -1;
+static char g_iana_tz[64] = {0};
 
+static int is_proc_alive(pid_t pid);
+static pid_t check_proc_pid(pid_t p, int is_scan);
 static pid_t get_pid(void);
 static void clear_pid(void);
 static void release_lock(void);
@@ -84,16 +88,28 @@ static int reload_service(void);
 
 static char *trim_str(char *str) {
     if (!str) return NULL;
-    while (*str && (isspace((unsigned char)*str) || *str == '"' || *str == '\'' || *str == '[' || *str == ']')) str++;
+    while (*str && isspace((unsigned char)*str)) str++;
     if (*str == '\0') return str;
     char *end = str + strlen(str) - 1;
-    while (end > str && (isspace((unsigned char)*end) || *end == '"' || *end == '\'' || *end == '[' || *end == ']' || *end == '\r' || *end == '\n')) end--;
+    while (end > str && isspace((unsigned char)*end)) end--;
     end[1] = '\0';
+    if (end > str) {
+        if ((*str == '"' && *end == '"') || (*str == '\'' && *end == '\'')) {
+            str++;
+            *end = '\0';
+            while (*str && isspace((unsigned char)*str)) str++;
+            if (*str != '\0') {
+                end = str + strlen(str) - 1;
+                while (end > str && isspace((unsigned char)*end)) end--;
+                end[1] = '\0';
+            }
+        }
+    }
     return str;
 }
 
 static void get_self_dir(char *dir_buf, size_t size) {
-    char exe_path[256];
+    char exe_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len > 0) {
         exe_path[len] = '\0';
@@ -149,15 +165,44 @@ static int resolve_gid(const char *name, gid_t *out) {
 }
 
 static int apply_nofile_limit(void) {
-    struct rlimit rl = {(rlim_t)NOFILE_LIMIT, (rlim_t)NOFILE_LIMIT};
-    if (setrlimit(RLIMIT_NOFILE, &rl) == 0) return 0;
-    log_msg(1, "setrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
-    return -1;
+    struct rlimit old_rl;
+    if (getrlimit(RLIMIT_NOFILE, &old_rl) != 0) {
+        log_msg(1, "getrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
+        return -1;
+    }
+    rlim_t target = (rlim_t)NOFILE_LIMIT;
+    struct rlimit new_rl;
+
+    if (target <= old_rl.rlim_max) {
+        new_rl.rlim_cur = target;
+        new_rl.rlim_max = old_rl.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &new_rl) != 0) {
+            log_msg(1, "setrlimit(RLIMIT_NOFILE, soft=%ld) failed: %s", (long)target, strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+
+    // target > old_rl.rlim_max: try to raise hard limit first
+    new_rl.rlim_cur = target;
+    new_rl.rlim_max = target;
+    if (setrlimit(RLIMIT_NOFILE, &new_rl) == 0) return 0;
+
+    // Raising hard limit failed, cap soft to current hard limit
+    new_rl.rlim_cur = old_rl.rlim_max;
+    new_rl.rlim_max = old_rl.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &new_rl) != 0) {
+        log_msg(1, "setrlimit(RLIMIT_NOFILE, capped=%ld) failed: %s", (long)old_rl.rlim_max, strerror(errno));
+        return -1;
+    }
+    log_msg(0, "Warning: requested nofile_limit %ld exceeds hard limit %ld, capped",
+            NOFILE_LIMIT, (long)old_rl.rlim_max);
+    return 0;
 }
 
 static int apply_credentials(const char *user_spec) {
     if (!user_spec || user_spec[0] == '\0') return 0;
-    if (strcmp(user_spec, "root") == 0 || strcmp(user_spec, "root:root") == 0 || strcmp(user_spec, "0:0") == 0) return 0;
+    if (strcmp(user_spec, "root") == 0 || strcmp(user_spec, "root:root") == 0 || strcmp(user_spec, "0:0") == 0 || strcmp(user_spec, "0") == 0 || strcmp(user_spec, "root:0") == 0) return 0;
 
     char spec_copy[64];
     snprintf(spec_copy, sizeof(spec_copy), "%s", user_spec);
@@ -212,7 +257,7 @@ static int apply_credentials(const char *user_spec) {
 // ================= Configuration & INI Parser =================
 
 static void expand_vars(char *dst, size_t dst_size, const char *src) {
-    char temp[256];
+    char temp[PATH_MAX];
     size_t di = 0, si = 0, len = strlen(src);
     while (si < len && di < sizeof(temp) - 1) {
         if (src[si] == '$') {
@@ -264,7 +309,15 @@ static int parse_long_value(const char *key, const char *value, long min, long m
     return 0;
 }
 
-static int parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdir, int *has_logfile, int *has_errlog, int *has_sblog, int *has_lockdir, int *has_workdir) {
+static int parse_ini_raw(char *line,
+                         char *raw_work_dir, size_t work_dir_size, int *has_workdir,
+                         char *raw_bin, size_t bin_size, int *has_bin,
+                         char *raw_pid, size_t pid_size, int *has_pid,
+                         char *raw_logdir, size_t logdir_size, int *has_logdir,
+                         char *raw_logfile, size_t logfile_size, int *has_logfile,
+                         char *raw_errlog, size_t errlog_size, int *has_errlog,
+                         char *raw_sblog, size_t sblog_size, int *has_sblog,
+                         char *raw_lockdir, size_t lockdir_size, int *has_lockdir) {
     line = trim_str(line);
     if (!line || line[0] == '\0' || line[0] == '#' || line[0] == ';' || line[0] == '[') return 0;
 
@@ -277,34 +330,31 @@ static int parse_ini_line(char *line, int *has_bin, int *has_pid, int *has_logdi
     strip_inline_comment(raw_val);
     char *val = trim_str(raw_val);
 
-    char exp_val[256];
-    expand_vars(exp_val, sizeof(exp_val), val);
-
-    if (strcasecmp(key, "service_name") == 0) snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%.63s", exp_val);
-    else if (strcasecmp(key, "work_dir") == 0) { snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.255s", exp_val); *has_workdir = 1; }
-    else if (strcasecmp(key, "bin_path") == 0) { snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.255s", exp_val); *has_bin = 1; }
-    else if (strcasecmp(key, "pid_file") == 0) { snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.255s", exp_val); *has_pid = 1; }
-    else if (strcasecmp(key, "log_dir") == 0) { snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.255s", exp_val); *has_logdir = 1; }
-    else if (strcasecmp(key, "log_file") == 0) { snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.255s", exp_val); *has_logfile = 1; }
-    else if (strcasecmp(key, "error_log") == 0) { snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.255s", exp_val); *has_errlog = 1; }
-    else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) { snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.255s", exp_val); *has_sblog = 1; }
-    else if (strcasecmp(key, "lock_dir") == 0) { snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.255s", exp_val); *has_lockdir = 1; }
-    else if (strcasecmp(key, "run_user") == 0) snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%.63s", exp_val);
-    else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%.63s", exp_val);
-    else if (strcasecmp(key, "max_log_size") == 0) return parse_long_value(key, exp_val, 1, LONG_MAX, &g_cfg.max_log_size);
+    if (strcasecmp(key, "service_name") == 0) snprintf(g_cfg.service_name, sizeof(g_cfg.service_name), "%s", val);
+    else if (strcasecmp(key, "work_dir") == 0) { snprintf(raw_work_dir, work_dir_size, "%s", val); *has_workdir = 1; }
+    else if (strcasecmp(key, "bin_path") == 0) { snprintf(raw_bin, bin_size, "%s", val); *has_bin = 1; }
+    else if (strcasecmp(key, "pid_file") == 0) { snprintf(raw_pid, pid_size, "%s", val); *has_pid = 1; }
+    else if (strcasecmp(key, "log_dir") == 0) { snprintf(raw_logdir, logdir_size, "%s", val); *has_logdir = 1; }
+    else if (strcasecmp(key, "log_file") == 0) { snprintf(raw_logfile, logfile_size, "%s", val); *has_logfile = 1; }
+    else if (strcasecmp(key, "error_log") == 0) { snprintf(raw_errlog, errlog_size, "%s", val); *has_errlog = 1; }
+    else if (strcasecmp(key, "singbox_log") == 0 || strcasecmp(key, "service_log") == 0) { snprintf(raw_sblog, sblog_size, "%s", val); *has_sblog = 1; }
+    else if (strcasecmp(key, "lock_dir") == 0) { snprintf(raw_lockdir, lockdir_size, "%s", val); *has_lockdir = 1; }
+    else if (strcasecmp(key, "run_user") == 0) snprintf(g_cfg.run_user, sizeof(g_cfg.run_user), "%s", val);
+    else if (strcasecmp(key, "timezone") == 0 || strcasecmp(key, "tz") == 0) snprintf(g_cfg.timezone, sizeof(g_cfg.timezone), "%s", val);
+    else if (strcasecmp(key, "max_log_size") == 0) return parse_long_value(key, val, 1, LONG_MAX, &g_cfg.max_log_size);
     else if (strcasecmp(key, "stop_timeout") == 0) {
         long parsed;
-        if (parse_long_value(key, exp_val, 0, 3600, &parsed) != 0) return -1;
+        if (parse_long_value(key, val, 0, 3600, &parsed) != 0) return -1;
         g_cfg.stop_timeout = (int)parsed;
     } else if (strcasecmp(key, "start_timeout") == 0) {
         long parsed;
-        if (parse_long_value(key, exp_val, 1, 3600, &parsed) != 0) return -1;
+        if (parse_long_value(key, val, 1, 3600, &parsed) != 0) return -1;
         g_cfg.start_timeout = (int)parsed;
     } else if (strcasecmp(key, "check_config") == 0) {
         long parsed;
-        if (parse_long_value(key, exp_val, 0, 1, &parsed) != 0) return -1;
+        if (parse_long_value(key, val, 0, 1, &parsed) != 0) return -1;
         g_cfg.check_config = (int)parsed;
-    } else if (strcasecmp(key, "nofile_limit") == 0) return parse_long_value(key, exp_val, 1, LONG_MAX, &g_cfg.nofile_limit);
+    } else if (strcasecmp(key, "nofile_limit") == 0) return parse_long_value(key, val, 1, LONG_MAX, &g_cfg.nofile_limit);
 
     return 0;
 }
@@ -352,6 +402,7 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
     char buf[128];
     while (total < (ssize_t)sizeof(buf) - 1) {
         ssize_t n = read(pipe_fd[0], buf + total, sizeof(buf) - 1 - total);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         total += n;
     }
@@ -371,39 +422,51 @@ static int get_android_prop(const char *prop_name, char *out_val, size_t out_len
 
 static void init_timezone(const char *custom_tz) {
     char tz_buf[64] = {0};
-    
+    g_iana_tz[0] = '\0';
+
     if (custom_tz && custom_tz[0] != '\0' && strcasecmp(custom_tz, "auto") != 0) {
         snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", custom_tz);
+        setenv("TZ", g_iana_tz, 1);
+        tzset();
+        return;
+    }
+
+    char prop_tz[64] = {0};
+    if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
+    } else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
+    } else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
+        snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
     } else {
-        const char *env_tz = getenv("TZ");
-        if (env_tz && env_tz[0] != '\0' && strcasecmp(env_tz, "auto") != 0 && strchr(env_tz, '/')) {
-            snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", env_tz);
-        } else {
-            char prop_tz[64] = {0};
-            if (get_android_prop("persist.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
-            } else if (get_android_prop("ro.sys.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
-            } else if (get_android_prop("ro.build.timezone", prop_tz, sizeof(prop_tz)) == 0 && prop_tz[0] != '\0') {
-                snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", prop_tz);
-            } else {
-                int tz_fd = open("/etc/timezone", O_RDONLY);
-                if (tz_fd >= 0) {
-                    ssize_t n = read(tz_fd, tz_buf, sizeof(tz_buf) - 1);
-                    close(tz_fd);
-                    if (n > 0) {
-                        tz_buf[n] = '\0';
-                        char *trimmed = trim_str(tz_buf);
-                        if (trimmed && trimmed[0] != '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", trimmed);
-                    }
+        int tz_fd = open("/etc/timezone", O_RDONLY);
+        if (tz_fd >= 0) {
+            ssize_t n = read(tz_fd, tz_buf, sizeof(tz_buf) - 1);
+            close(tz_fd);
+            if (n > 0) {
+                tz_buf[n] = '\0';
+                char *trimmed = trim_str(tz_buf);
+                if (trimmed && trimmed[0] != '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", trimmed);
+            }
+        }
+        if (g_iana_tz[0] == '\0') {
+            char link_buf[PATH_MAX];
+            ssize_t llen = readlink("/etc/localtime", link_buf, sizeof(link_buf) - 1);
+            if (llen > 0) {
+                link_buf[llen] = '\0';
+                char *pos = strstr(link_buf, "zoneinfo/");
+                if (pos) {
+                    pos += 9;
+                    if (*pos) snprintf(g_iana_tz, sizeof(g_iana_tz), "%.63s", pos);
                 }
             }
-            if (g_iana_tz[0] == '\0') snprintf(g_iana_tz, sizeof(g_iana_tz), "Asia/Shanghai");
         }
     }
 
-    setenv("TZ", g_iana_tz, 1);
-    tzset();
+    if (g_iana_tz[0] != '\0') {
+        setenv("TZ", g_iana_tz, 1);
+        tzset();
+    }
 }
 
 static int load_config(void) {
@@ -418,11 +481,19 @@ static int load_config(void) {
     g_cfg.nofile_limit = 1000000L;
 
     int has_bin = 0, has_pid = 0, has_logdir = 0, has_logfile = 0, has_errlog = 0, has_sblog = 0, has_lockdir = 0, has_workdir = 0;
+    char raw_work_dir[PATH_MAX] = {0};
+    char raw_bin[PATH_MAX] = {0};
+    char raw_pid[PATH_MAX] = {0};
+    char raw_logdir[PATH_MAX] = {0};
+    char raw_logfile[PATH_MAX] = {0};
+    char raw_errlog[PATH_MAX] = {0};
+    char raw_sblog[PATH_MAX] = {0};
+    char raw_lockdir[PATH_MAX] = {0};
 
-    char self_dir[256];
+    char self_dir[PATH_MAX];
     get_self_dir(self_dir, sizeof(self_dir));
 
-    char self_ini[300];
+    char self_ini[PATH_MAX + 16];
     snprintf(self_ini, sizeof(self_ini), "%s/box.ini", self_dir);
 
     const char *candidates[] = {
@@ -453,7 +524,15 @@ static int load_config(void) {
                     }
                     if (lpos > 0) {
                         line[lpos] = '\0';
-                        if (parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir) != 0) {
+                        if (parse_ini_raw(line,
+                                          raw_work_dir, sizeof(raw_work_dir), &has_workdir,
+                                          raw_bin, sizeof(raw_bin), &has_bin,
+                                          raw_pid, sizeof(raw_pid), &has_pid,
+                                          raw_logdir, sizeof(raw_logdir), &has_logdir,
+                                          raw_logfile, sizeof(raw_logfile), &has_logfile,
+                                          raw_errlog, sizeof(raw_errlog), &has_errlog,
+                                          raw_sblog, sizeof(raw_sblog), &has_sblog,
+                                          raw_lockdir, sizeof(raw_lockdir), &has_lockdir) != 0) {
                             close(fd);
                             return -1;
                         }
@@ -478,7 +557,15 @@ static int load_config(void) {
         }
         if (lpos > 0) {
             line[lpos] = '\0';
-            if (parse_ini_line(line, &has_bin, &has_pid, &has_logdir, &has_logfile, &has_errlog, &has_sblog, &has_lockdir, &has_workdir) != 0) {
+            if (parse_ini_raw(line,
+                              raw_work_dir, sizeof(raw_work_dir), &has_workdir,
+                              raw_bin, sizeof(raw_bin), &has_bin,
+                              raw_pid, sizeof(raw_pid), &has_pid,
+                              raw_logdir, sizeof(raw_logdir), &has_logdir,
+                              raw_logfile, sizeof(raw_logfile), &has_logfile,
+                              raw_errlog, sizeof(raw_errlog), &has_errlog,
+                              raw_sblog, sizeof(raw_sblog), &has_sblog,
+                              raw_lockdir, sizeof(raw_lockdir), &has_lockdir) != 0) {
                 close(fd);
                 return -1;
             }
@@ -487,7 +574,9 @@ static int load_config(void) {
         if (found) break;
     }
 
-    if (!has_workdir || g_cfg.work_dir[0] == '\0') {
+    if (has_workdir && raw_work_dir[0] != '\0') {
+        expand_vars(g_cfg.work_dir, sizeof(g_cfg.work_dir), raw_work_dir);
+    } else {
         int is_sys_bin = (strcmp(self_dir, "/system/bin") == 0 ||
                           strcmp(self_dir, "/system/xbin") == 0 ||
                           strcmp(self_dir, "/sbin") == 0 ||
@@ -498,19 +587,32 @@ static int load_config(void) {
                           strstr(self_dir, "/magisk") != NULL);
 
         if (!is_sys_bin && self_dir[0] != '\0' && strcmp(self_dir, ".") != 0) {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%.255s", self_dir);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "%s", self_dir);
         } else {
-            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%.63s", g_cfg.service_name);
+            snprintf(g_cfg.work_dir, sizeof(g_cfg.work_dir), "/data/adb/%s", g_cfg.service_name);
         }
     }
 
-    if (!has_bin)     snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.180s/bin/%.60s", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_pid)     snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.180s/%.60s.pid", g_cfg.work_dir, g_cfg.service_name);
-    if (!has_logdir)  snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.240s/logs", g_cfg.work_dir);
-    if (!has_logfile) snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.240s/run.log", g_cfg.log_dir);
-    if (!has_errlog)  snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.230s/run_error.log", g_cfg.log_dir);
-    if (!has_sblog)   snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.180s/%.60s.log", g_cfg.log_dir, g_cfg.service_name);
-    if (!has_lockdir) snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.240s/.box.lock", g_cfg.work_dir);
+    if (has_bin)     expand_vars(g_cfg.bin_path, sizeof(g_cfg.bin_path), raw_bin);
+    else             snprintf(g_cfg.bin_path, sizeof(g_cfg.bin_path), "%.1024s/bin/%.60s", g_cfg.work_dir, g_cfg.service_name);
+
+    if (has_pid)     expand_vars(g_cfg.pid_file, sizeof(g_cfg.pid_file), raw_pid);
+    else             snprintf(g_cfg.pid_file, sizeof(g_cfg.pid_file), "%.1024s/%.60s.pid", g_cfg.work_dir, g_cfg.service_name);
+
+    if (has_logdir)  expand_vars(g_cfg.log_dir, sizeof(g_cfg.log_dir), raw_logdir);
+    else             snprintf(g_cfg.log_dir, sizeof(g_cfg.log_dir), "%.1024s/logs", g_cfg.work_dir);
+
+    if (has_logfile) expand_vars(g_cfg.log_file, sizeof(g_cfg.log_file), raw_logfile);
+    else             snprintf(g_cfg.log_file, sizeof(g_cfg.log_file), "%.1024s/run.log", g_cfg.log_dir);
+
+    if (has_errlog)  expand_vars(g_cfg.error_log, sizeof(g_cfg.error_log), raw_errlog);
+    else             snprintf(g_cfg.error_log, sizeof(g_cfg.error_log), "%.1024s/run_error.log", g_cfg.log_dir);
+
+    if (has_sblog)   expand_vars(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), raw_sblog);
+    else             snprintf(g_cfg.singbox_log, sizeof(g_cfg.singbox_log), "%.1024s/%.60s.log", g_cfg.log_dir, g_cfg.service_name);
+
+    if (has_lockdir) expand_vars(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), raw_lockdir);
+    else             snprintf(g_cfg.lock_dir, sizeof(g_cfg.lock_dir), "%.1024s/.box.lock", g_cfg.work_dir);
 
     init_timezone(g_cfg.timezone);
     return 0;
@@ -563,7 +665,18 @@ static void log_msg(int is_err, const char *fmt, ...) {
 
     int log_fd = open(target_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (log_fd >= 0) {
-        dprintf(log_fd, "[%s] %s %s\n", timestamp, tag, message);
+        char full_line[1200];
+        int n = snprintf(full_line, sizeof(full_line), "[%s] %s %s\n", timestamp, tag, message);
+        if (n > 0) {
+            size_t to_write = (size_t)n < sizeof(full_line) ? (size_t)n : sizeof(full_line) - 1;
+            size_t written = 0;
+            while (written < to_write) {
+                ssize_t w = write(log_fd, full_line + written, to_write - written);
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) break;
+                written += (size_t)w;
+            }
+        }
         close(log_fd);
     }
 }
@@ -657,85 +770,11 @@ static void prepare_env(void) {
     }
 }
 
-static int remove_lock_dir(void) {
-    char pid_path[300];
-    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    if (unlink(pid_path) != 0 && errno != ENOENT) return -1;
-    if (rmdir(LOCK_DIR) != 0) return -1;
-    return 0;
-}
-
 static void release_lock(void) {
-    if (g_lock_acquired) {
-        remove_lock_dir();
-        g_lock_acquired = 0;
+    if (g_lock_fd >= 0) {
+        close(g_lock_fd);
+        g_lock_fd = -1;
     }
-}
-
-static int write_lock_pid(void) {
-    char pid_path[300];
-    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    int fd = open(pid_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return -1;
-    if (dprintf(fd, "%d\n", getpid()) < 0) {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-        return -1;
-    }
-    if (close(fd) != 0) return -1;
-    return 0;
-}
-
-static int is_lock_stale(void) {
-    char pid_path[300];
-    snprintf(pid_path, sizeof(pid_path), "%s/pid", LOCK_DIR);
-    int fd = open(pid_path, O_RDONLY);
-    if (fd >= 0) {
-        char pbuf[32];
-        ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
-        close(fd);
-        if (n > 0) {
-            pbuf[n] = '\0';
-            pid_t lock_pid = (pid_t)atoi(pbuf);
-            if (lock_pid > 0) {
-                if (lock_pid == getpid()) return 0;
-                if (kill(lock_pid, 0) != 0 && errno == ESRCH) return 1;
-
-                char comm_path[64];
-                snprintf(comm_path, sizeof(comm_path), "/proc/%d/comm", lock_pid);
-                int cfd = open(comm_path, O_RDONLY);
-                if (cfd >= 0) {
-                    char comm[64] = {0};
-                    ssize_t cn = read(cfd, comm, sizeof(comm) - 1);
-                    close(cfd);
-                    if (cn > 0) {
-                        comm[cn] = '\0';
-                        if (strstr(comm, "box") != NULL) return 0;
-                    }
-                }
-                return 1;
-            }
-        }
-    }
-    struct stat st;
-    if (stat(LOCK_DIR, &st) == 0) {
-        time_t now = time(NULL);
-        if (st.st_mtime > 0 && now > st.st_mtime && (now - st.st_mtime) > 60) return 1;
-        return 0;
-    }
-    return 0;
-}
-
-static int waitpid_retry(pid_t pid, int *status) {
-    pid_t result;
-    do result = waitpid(pid, status, 0); while (result < 0 && errno == EINTR);
-    return result == pid ? 0 : -1;
-}
-
-static void signal_lock_cleanup(int sig) {
-    release_lock();
-    _exit(128 + sig);
 }
 
 static void reset_lock_cleanup_signals(void) {
@@ -747,94 +786,207 @@ static void reset_lock_cleanup_signals(void) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
     sigaction(SIGQUIT, &sa, NULL);
+
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 }
 
 static void acquire_lock(void) {
-    int attempts = 0;
-    while (mkdir(LOCK_DIR, 0755) != 0) {
-        if (errno != EEXIST) {
-            log_error("Failed to create lock directory %s: %s", LOCK_DIR, strerror(errno));
-            exit(1);
+    char lock_path[PATH_MAX];
+    struct stat st;
+    if (stat(LOCK_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(lock_path, sizeof(lock_path), "%.1024s/flock", LOCK_DIR);
+    } else {
+        snprintf(lock_path, sizeof(lock_path), "%s", LOCK_DIR);
+    }
+
+    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        log_error("Failed to open lock file %s: %s", lock_path, strerror(errno));
+        exit(1);
+    }
+
+    for (int attempts = 0; attempts < 10; attempts++) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            g_lock_fd = fd;
+            atexit(release_lock);
+            return;
         }
-        if (is_lock_stale()) {
-            if (remove_lock_dir() != 0) {
-                int saved_errno = errno;
-                log_error("Failed to remove stale lock directory %s: %s", LOCK_DIR, strerror(saved_errno));
-                exit(1);
-            }
-            continue;
-        }
-        attempts++;
-        if (attempts >= 10) {
-            log_error("Another box operation is in progress, please try again later");
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
+            log_error("Failed to lock %s: %s", lock_path, strerror(errno));
+            close(fd);
             exit(1);
         }
         sleep(1);
     }
-    if (write_lock_pid() != 0) {
-        log_error("Failed to initialize lock PID file in %s: %s", LOCK_DIR, strerror(errno));
-        remove_lock_dir();
-        exit(1);
-    }
-    g_lock_acquired = 1;
-    atexit(release_lock);
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = signal_lock_cleanup;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGHUP, &sa, NULL);
-    sigaction(SIGQUIT, &sa, NULL);
+    log_error("Another box operation is in progress, please try again later");
+    close(fd);
+    exit(1);
 }
 
-static pid_t check_proc_pid(pid_t p) {
-    if (p <= 0 || kill(p, 0) != 0) return -1;
+static int waitpid_retry(pid_t pid, int *status) {
+    pid_t result;
+    do result = waitpid(pid, status, 0); while (result < 0 && errno == EINTR);
+    return result == pid ? 0 : -1;
+}
 
-    char exe_path[64], link_target[256];
+static int is_proc_alive(pid_t pid) {
+    if (pid <= 1) return 0;
+    if (kill(pid, 0) != 0) {
+        if (errno == ESRCH) return 0;
+    }
+    char stat_path[64];
+    snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
+    int fd = open(stat_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buf[256];
+    ssize_t n = 0;
+    while (n < (ssize_t)sizeof(buf) - 1) {
+        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += r;
+    }
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    char *rp = strrchr(buf, ')');
+    if (!rp || rp + 2 >= buf + n) return 0;
+    char state = *(rp + 2);
+    if (state == 'Z' || state == 'X') return 0;
+    return 1;
+}
+
+static pid_t check_proc_pid(pid_t p, int is_scan) {
+    if (!is_proc_alive(p)) return -1;
+
+    char exe_path[64], link_target[PATH_MAX];
     snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", p);
     ssize_t len = readlink(exe_path, link_target, sizeof(link_target) - 1);
+    int exe_matched = 0;
     if (len > 0) {
         link_target[len] = '\0';
+        if (len > 10 && strcmp(link_target + len - 10, " (deleted)") == 0) {
+            link_target[len - 10] = '\0';
+        }
         if (strcmp(link_target, BIN_PATH) == 0) {
-            return p;
+            exe_matched = 1;
+        } else {
+            char canonical_bin[PATH_MAX];
+            if (realpath(BIN_PATH, canonical_bin) != NULL) {
+                if (strcmp(link_target, canonical_bin) == 0) exe_matched = 1;
+            }
         }
     }
 
     char cmdline_path[64];
     snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", p);
-    int cfd = open(cmdline_path, O_RDONLY);
+    int cfd = open(cmdline_path, O_RDONLY | O_CLOEXEC);
     if (cfd >= 0) {
-        char cmd_buf[512] = {0};
-        ssize_t n = read(cfd, cmd_buf, sizeof(cmd_buf) - 1);
+        char cmd_buf[1024];
+        ssize_t n = 0;
+        while (n < (ssize_t)sizeof(cmd_buf)) {
+            ssize_t cr = read(cfd, cmd_buf + n, sizeof(cmd_buf) - (size_t)n);
+            if (cr < 0 && errno == EINTR) continue;
+            if (cr <= 0) break;
+            n += cr;
+        }
         close(cfd);
         if (n > 0) {
-            size_t cmd0_len = strnlen(cmd_buf, (size_t)n);
-            int match_bin = (strlen(BIN_PATH) == cmd0_len && memcmp(cmd_buf, BIN_PATH, cmd0_len) == 0);
-            int match_dir = (WORK_DIR[0] != '\0' && memmem(cmd_buf, n, WORK_DIR, strlen(WORK_DIR)) != NULL);
-            if (match_bin && match_dir) return p;
+            const char *cursor = cmd_buf;
+            size_t remaining = (size_t)n;
+
+            const char *nul0 = memchr(cursor, '\0', remaining);
+            if (!nul0) return -1;
+            size_t len0 = (size_t)(nul0 - cursor);
+            const char *argv0 = cursor;
+            cursor = nul0 + 1;
+            remaining -= (len0 + 1);
+
+            if (!exe_matched) {
+                if (len0 == strlen(BIN_PATH) && memcmp(argv0, BIN_PATH, len0) == 0) {
+                    exe_matched = 1;
+                } else {
+                    char canonical_bin[PATH_MAX];
+                    if (realpath(BIN_PATH, canonical_bin) != NULL) {
+                        if (len0 == strlen(canonical_bin) && memcmp(argv0, canonical_bin, len0) == 0) {
+                            exe_matched = 1;
+                        }
+                    }
+                }
+            }
+            if (!exe_matched) return -1;
+
+            const char *nul1 = memchr(cursor, '\0', remaining);
+            if (!nul1) return -1;
+            size_t len1 = (size_t)(nul1 - cursor);
+            const char *argv1 = cursor;
+            cursor = nul1 + 1;
+            remaining -= (len1 + 1);
+
+            if (len1 != 3 || memcmp(argv1, "run", 3) != 0) {
+                return -1;
+            }
+
+            size_t work_dir_len = strlen(WORK_DIR);
+            int matched_work_dir = (work_dir_len == 0) ? 1 : 0;
+
+            while (remaining > 0) {
+                const char *nul = memchr(cursor, '\0', remaining);
+                if (!nul) return -1;
+                size_t tlen = (size_t)(nul - cursor);
+                const char *token = cursor;
+                cursor = nul + 1;
+                remaining -= (tlen + 1);
+
+                if (tlen == 2 && memcmp(token, "-D", 2) == 0) {
+                    const char *next_nul = memchr(cursor, '\0', remaining);
+                    if (!next_nul) return -1;
+                    size_t next_len = (size_t)(next_nul - cursor);
+                    const char *next_token = cursor;
+                    cursor = next_nul + 1;
+                    remaining -= (next_len + 1);
+
+                    if (next_len == work_dir_len && memcmp(next_token, WORK_DIR, work_dir_len) == 0) {
+                        matched_work_dir = 1;
+                    }
+                }
+            }
+
+            if (matched_work_dir) return p;
+            return -1;
         }
+    }
+
+    if (!is_scan && exe_matched) {
+        return p;
     }
     return -1;
 }
 
 static pid_t scan_proc_for_service(void) {
-    int fd = open("/proc", O_RDONLY | O_DIRECTORY);
+    int fd = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return -1;
     char buf[1024];
     pid_t found_pid = -1;
+    size_t min_entry = offsetof(struct linux_dirent64, d_name) + 1;
     while (1) {
         long nread = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+        if (nread < 0 && errno == EINTR) continue;
         if (nread <= 0) break;
         for (long bpos = 0; bpos < nread;) {
+            long remaining = nread - bpos;
+            if ((size_t)remaining < min_entry) break;
             struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + bpos);
-            if (isdigit((unsigned char)d->d_name[0])) {
-                pid_t p = (pid_t)atoi(d->d_name);
-                if (p > 0 && p != getpid() && check_proc_pid(p) > 0) {
-                    found_pid = p;
+            if ((size_t)d->d_reclen < min_entry || d->d_reclen > remaining) break;
+            size_t name_max = (size_t)d->d_reclen - offsetof(struct linux_dirent64, d_name);
+            if (memchr(d->d_name, '\0', name_max) != NULL && isdigit((unsigned char)d->d_name[0])) {
+                char *end = NULL;
+                long p = strtol(d->d_name, &end, 10);
+                if (p > 1 && (pid_t)p != getpid() && check_proc_pid((pid_t)p, 1) > 0) {
+                    found_pid = (pid_t)p;
                     break;
                 }
             }
@@ -847,21 +999,28 @@ static pid_t scan_proc_for_service(void) {
 }
 
 static pid_t get_pid(void) {
-    int fd = open(PID_FILE, O_RDONLY);
+    int fd = open(PID_FILE, O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
         char pbuf[32];
-        ssize_t n = read(fd, pbuf, sizeof(pbuf) - 1);
+        ssize_t n = 0;
+        while (n < (ssize_t)sizeof(pbuf) - 1) {
+            ssize_t r = read(fd, pbuf + n, sizeof(pbuf) - 1 - n);
+            if (r < 0 && errno == EINTR) continue;
+            if (r <= 0) break;
+            n += r;
+        }
         close(fd);
         if (n > 0) {
             pbuf[n] = '\0';
-            pid_t p = (pid_t)atoi(pbuf);
-            if (p > 0 && check_proc_pid(p) > 0) return p;
+            char *end = NULL;
+            long p = strtol(pbuf, &end, 10);
+            if (p > 1 && check_proc_pid((pid_t)p, 0) > 0) return (pid_t)p;
         }
     }
 
     pid_t discovered_pid = scan_proc_for_service();
     if (discovered_pid > 0) {
-        int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (pf >= 0) {
             dprintf(pf, "%d\n", discovered_pid);
             close(pf);
@@ -946,47 +1105,75 @@ static int display_status(void) {
         time_t now = time(NULL);
         struct tm local_tm;
         localtime_r(&now, &local_tm);
-        long offset = local_tm.tm_gmtoff;
-        int off_h = abs((int)(offset / 3600));
-        int off_m = abs((int)((offset % 3600) / 60));
-        char sign = offset >= 0 ? '+' : '-';
-        log_info("Timezone: %s (UTC%c%02d:%02d)", g_iana_tz, sign, off_h, off_m);
+        if (local_tm.tm_gmtoff != 0 || (local_tm.tm_zone && strcmp(local_tm.tm_zone, "UTC") != 0) || strcmp(g_iana_tz, "UTC") == 0) {
+            long offset = local_tm.tm_gmtoff;
+            int off_h = abs((int)(offset / 3600));
+            int off_m = abs((int)((offset % 3600) / 60));
+            char sign = offset >= 0 ? '+' : '-';
+            log_info("Timezone: %s (UTC%c%02d:%02d)", g_iana_tz, sign, off_h, off_m);
+        } else {
+            log_info("Timezone: %s (offset unavailable)", g_iana_tz);
+        }
     }
 
     char status_path[64];
     snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
-    int sfd = open(status_path, O_RDONLY);
+    int sfd = open(status_path, O_RDONLY | O_CLOEXEC);
     if (sfd >= 0) {
-        char sbuf[1024];
-        ssize_t sn = read(sfd, sbuf, sizeof(sbuf) - 1);
-        close(sfd);
-        if (sn > 0) {
-            sbuf[sn] = '\0';
-            char *vm = strstr(sbuf, "VmRSS:");
-            if (vm) {
-                vm += 6;
-                while (*vm == ' ' || *vm == '\t') vm++;
-                long long mem_kb = strtoll(vm, NULL, 10);
-                if (mem_kb >= 0) {
-                    char mem_str[32];
-                    fmt_mem(mem_kb, mem_str, sizeof(mem_str));
-                    log_info("Memory usage: %s", mem_str);
+        char sbuf[512];
+        char line_buf[256];
+        size_t lpos = 0;
+        int found_vm = 0;
+        while (!found_vm) {
+            ssize_t sn = read(sfd, sbuf, sizeof(sbuf));
+            if (sn < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (sn == 0) break;
+            for (ssize_t i = 0; i < sn; i++) {
+                char c = sbuf[i];
+                if (c == '\n') {
+                    line_buf[lpos] = '\0';
+                    if (strncmp(line_buf, "VmRSS:", 6) == 0) {
+                        char *vm = line_buf + 6;
+                        while (*vm == ' ' || *vm == '\t') vm++;
+                        long long mem_kb = strtoll(vm, NULL, 10);
+                        if (mem_kb >= 0) {
+                            char mem_str[32];
+                            fmt_mem(mem_kb, mem_str, sizeof(mem_str));
+                            log_info("Memory usage: %s", mem_str);
+                            found_vm = 1;
+                            break;
+                        }
+                    }
+                    lpos = 0;
+                } else if (lpos < sizeof(line_buf) - 1) {
+                    line_buf[lpos++] = c;
                 }
             }
         }
+        close(sfd);
     }
 
-    long long sys_uptime_sec = 0;
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    if (clk_tck <= 0) clk_tck = 100;
+
+    unsigned long long uptime_ticks = 0;
     struct timespec bts;
     if (clock_gettime(CLOCK_BOOTTIME, &bts) == 0) {
-        sys_uptime_sec = (long long)bts.tv_sec;
+        uptime_ticks = (unsigned long long)bts.tv_sec * (unsigned long long)clk_tck +
+                       ((unsigned long long)bts.tv_nsec * (unsigned long long)clk_tck) / 1000000000ULL;
     } else {
         int ufd = open("/proc/uptime", O_RDONLY);
         if (ufd >= 0) {
             char ubuf[64] = {0};
             ssize_t un = read(ufd, ubuf, sizeof(ubuf) - 1);
             close(ufd);
-            if (un > 0) sys_uptime_sec = (long long)atoll(ubuf);
+            if (un > 0) {
+                double up_sec = strtod(ubuf, NULL);
+                if (up_sec > 0) uptime_ticks = (unsigned long long)(up_sec * (double)clk_tck);
+            }
         }
     }
 
@@ -994,13 +1181,13 @@ static int display_status(void) {
     snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
     int stfd = open(stat_path, O_RDONLY);
     if (stfd >= 0) {
-        char stat_buf[512];
+        char stat_buf[1024];
         ssize_t stn = read(stfd, stat_buf, sizeof(stat_buf) - 1);
         close(stfd);
         if (stn > 0) {
             stat_buf[stn] = '\0';
             char *right_paren = strrchr(stat_buf, ')');
-            if (right_paren) {
+            if (right_paren && right_paren + 2 < stat_buf + stn) {
                 unsigned long long utime = 0, stime = 0, starttime = 0;
                 int field_idx = 3;
                 char *p = right_paren + 2;
@@ -1015,28 +1202,20 @@ static int display_status(void) {
                     field_idx++;
                 }
 
-                long clk_tck = sysconf(_SC_CLK_TCK);
-                if (clk_tck <= 0) clk_tck = 100;
+                unsigned long long elapsed_ticks = 0;
+                if (uptime_ticks > starttime) elapsed_ticks = uptime_ticks - starttime;
+                long total_sec = (long)(elapsed_ticks / (unsigned long long)clk_tck);
 
-                unsigned long long starttime_sec = starttime / (unsigned long long)clk_tck;
-                long long total_sec = (sys_uptime_sec > 0) ? (sys_uptime_sec - (long long)starttime_sec) : 0;
-                if (total_sec < 0) total_sec = 0;
-
-                if (total_sec > 0) {
+                if (elapsed_ticks > 0) {
                     unsigned long long cpu_ticks = utime + stime;
-                    unsigned long long total_ticks = (unsigned long long)total_sec * (unsigned long long)clk_tck;
-                    if (total_ticks > 0) {
-                        unsigned long long cpu_tenths = (cpu_ticks * 1000ULL) / total_ticks;
-                        log_info("CPU usage: %llu.%llu%% (avg)", cpu_tenths / 10ULL, cpu_tenths % 10ULL);
-                    } else {
-                        log_info("CPU usage: 0.0%% (avg)");
-                    }
+                    unsigned long long cpu_tenths = (cpu_ticks * 1000ULL) / elapsed_ticks;
+                    log_info("CPU usage: %llu.%llu%% (avg)", cpu_tenths / 10ULL, cpu_tenths % 10ULL);
                 } else {
                     log_info("CPU usage: 0.0%% (avg)");
                 }
 
                 char uptime_str[32];
-                fmt_uptime((long)total_sec, uptime_str, sizeof(uptime_str));
+                fmt_uptime(total_sec, uptime_str, sizeof(uptime_str));
                 log_info("Uptime: %s", uptime_str);
             }
         }
@@ -1050,10 +1229,16 @@ static int display_status(void) {
     int iofd = open(io_path, O_RDONLY);
     if (iofd >= 0) {
         char io_buf[512];
-        ssize_t ion = read(iofd, io_buf, sizeof(io_buf) - 1);
+        ssize_t total = 0;
+        while (total < (ssize_t)sizeof(io_buf) - 1) {
+            ssize_t ion = read(iofd, io_buf + total, sizeof(io_buf) - 1 - total);
+            if (ion < 0 && errno == EINTR) continue;
+            if (ion <= 0) break;
+            total += ion;
+        }
         close(iofd);
-        if (ion > 0) {
-            io_buf[ion] = '\0';
+        if (total > 0) {
+            io_buf[total] = '\0';
             long long read_bytes = -1, write_bytes = -1;
             char *rpos = strstr(io_buf, "read_bytes:");
             if (rpos) read_bytes = strtoll(rpos + 11, NULL, 10);
@@ -1085,6 +1270,8 @@ static int do_check(void) {
         log_error("Failed to create pipe: %s", strerror(errno));
         return 1;
     }
+    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -1096,10 +1283,19 @@ static int do_check(void) {
 
     if (pid == 0) {
         reset_lock_cleanup_signals();
+        release_lock();
         close(pipefd[0]);
+
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            close(devnull);
+        }
+
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+
         if (chdir(WORK_DIR) != 0 || apply_nofile_limit() != 0 || apply_credentials(RUN_USER) != 0) _exit(126);
         execl(BIN_PATH, BIN_PATH, "check", "-D", WORK_DIR, (char *)NULL);
         _exit(127);
@@ -1109,13 +1305,15 @@ static int do_check(void) {
     char output[1024] = {0};
     char discard[256];
     size_t total = 0;
-    ssize_t n;
     while (1) {
+        ssize_t n;
         if (total < sizeof(output) - 1) {
             n = read(pipefd[0], output + total, sizeof(output) - 1 - total);
-            if (n > 0) total += n;
+            if (n < 0 && errno == EINTR) continue;
+            if (n > 0) total += (size_t)n;
         } else {
             n = read(pipefd[0], discard, sizeof(discard));
+            if (n < 0 && errno == EINTR) continue;
         }
         if (n <= 0) break;
     }
@@ -1136,8 +1334,17 @@ static int do_check(void) {
     return 0;
 }
 
-
-
+static void child_report_err(int fd, int err, int exit_code) {
+    size_t written = 0;
+    while (written < sizeof(err)) {
+        ssize_t n = write(fd, ((const char *)&err) + written, sizeof(err) - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        written += (size_t)n;
+    }
+    close(fd);
+    _exit(exit_code);
+}
 
 static int start_service(void) {
     if (is_running()) {
@@ -1153,8 +1360,8 @@ static int start_service(void) {
         return 1;
     }
 
-    char config_file[300];
-    snprintf(config_file, sizeof(config_file), "%s/config.json", WORK_DIR);
+    char config_file[PATH_MAX];
+    snprintf(config_file, sizeof(config_file), "%.1024s/config.json", WORK_DIR);
     if (access(config_file, F_OK) != 0) {
         log_error("config.json not found in %s", WORK_DIR);
         return 1;
@@ -1173,18 +1380,38 @@ static int start_service(void) {
     rotate_log(ERROR_LOG);
     rotate_log(SINGBOX_LOG);
 
+    int sync_pipe[2];
+    if (pipe(sync_pipe) != 0) {
+        log_error("Failed to create startup synchronization pipe: %s", strerror(errno));
+        return 1;
+    }
+    fcntl(sync_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(sync_pipe[1], F_SETFD, FD_CLOEXEC);
+
     pid_t pid = fork();
     if (pid < 0) {
+        close(sync_pipe[0]);
+        close(sync_pipe[1]);
         log_error("Failed to fork process: %s", strerror(errno));
         return 1;
     }
 
     if (pid == 0) {
         reset_lock_cleanup_signals();
-        setsid();
-        if (chdir(WORK_DIR) != 0) _exit(127);
+        release_lock();
+        close(sync_pipe[0]);
 
-        if (apply_nofile_limit() != 0) _exit(125);
+        if (setsid() < 0) {
+            child_report_err(sync_pipe[1], errno, 127);
+        }
+
+        if (chdir(WORK_DIR) != 0) {
+            child_report_err(sync_pipe[1], errno, 127);
+        }
+
+        if (apply_nofile_limit() != 0) {
+            child_report_err(sync_pipe[1], errno, 125);
+        }
 
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd >= 0) {
@@ -1193,20 +1420,70 @@ static int start_service(void) {
         }
 
         int log_fd = open(SINGBOX_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (log_fd >= 0) {
-            dup2(log_fd, STDOUT_FILENO);
-            dup2(log_fd, STDERR_FILENO);
-            if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
+        if (log_fd < 0) {
+            child_report_err(sync_pipe[1], errno, 124);
         }
+        dup2(log_fd, STDOUT_FILENO);
+        dup2(log_fd, STDERR_FILENO);
+        if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
 
         if (g_iana_tz[0] != '\0') setenv("TZ", g_iana_tz, 1);
 
-        if (apply_credentials(RUN_USER) != 0) _exit(126);
+        if (apply_credentials(RUN_USER) != 0) {
+            child_report_err(sync_pipe[1], errno, 126);
+        }
+
         execl(BIN_PATH, BIN_PATH, "run", "-D", WORK_DIR, (char *)NULL);
-        _exit(127);
+        child_report_err(sync_pipe[1], errno, 127);
     }
 
-    int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    close(sync_pipe[1]);
+
+    int child_err = 0;
+    size_t total_read = 0;
+    int read_failed = 0;
+    int saved_errno = 0;
+
+    while (total_read < sizeof(child_err)) {
+        ssize_t sn = read(sync_pipe[0], ((char *)&child_err) + total_read, sizeof(child_err) - total_read);
+        if (sn < 0) {
+            if (errno == EINTR) continue;
+            read_failed = 1;
+            saved_errno = errno;
+            break;
+        }
+        if (sn == 0) break;
+        total_read += (size_t)sn;
+    }
+    close(sync_pipe[0]);
+
+    if (read_failed) {
+        int status = 0;
+        waitpid_retry(pid, &status);
+        log_error("Failed to read startup handshake from %s: %s", SERVICE_NAME, strerror(saved_errno));
+        clear_pid();
+        return 1;
+    }
+
+    if (total_read > 0 && total_read < sizeof(child_err)) {
+        int status = 0;
+        waitpid_retry(pid, &status);
+        log_error("%s startup handshake error: incomplete error report from child", SERVICE_NAME);
+        show_tail(SINGBOX_LOG, 10);
+        clear_pid();
+        return 1;
+    }
+
+    if (total_read == sizeof(child_err)) {
+        int status = 0;
+        waitpid_retry(pid, &status);
+        log_error("%s failed during startup setup/exec: %s", SERVICE_NAME, strerror(child_err));
+        show_tail(SINGBOX_LOG, 10);
+        clear_pid();
+        return 1;
+    }
+
+    int pf = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (pf >= 0) {
         dprintf(pf, "%d\n", pid);
         close(pf);
@@ -1226,23 +1503,28 @@ static int start_service(void) {
             else log_error("%s exited immediately after startup!", SERVICE_NAME);
             break;
         } else if (w < 0 && errno == ECHILD) {
-            if (kill(pid, 0) != 0) { child_alive = 0; break; }
+            if (!is_proc_alive(pid)) { child_alive = 0; break; }
         } else if (w < 0) {
             if (errno == EINTR) { i--; continue; }
             log_error("Failed to wait for %s startup: %s", SERVICE_NAME, strerror(errno));
             child_alive = 0;
             break;
         }
+
+        if (check_proc_pid(pid, 0) <= 0) {
+            child_alive = 0;
+            break;
+        }
     }
 
-    if (!child_alive || kill(pid, 0) != 0) {
-        log_error("%s failed to start! Check %s for details", SERVICE_NAME, SINGBOX_LOG);
+    if (!child_alive || check_proc_pid(pid, 0) <= 0) {
+        log_error("%s failed to stay alive during startup observation window! Check %s for details", SERVICE_NAME, SINGBOX_LOG);
         show_tail(SINGBOX_LOG, 10);
         clear_pid();
         return 1;
     }
 
-    log_info("%s started successfully (PID: %d)", SERVICE_NAME, pid);
+    log_info("%s exec succeeded, process alive (PID: %d)", SERVICE_NAME, pid);
     display_status();
     return 0;
 }
@@ -1259,20 +1541,20 @@ static int stop_service(void) {
     kill(pid, SIGTERM);
 
     for (int i = 0; i < STOP_TIMEOUT; i++) {
-        if (check_proc_pid(pid) <= 0) break;
+        if (!is_proc_alive(pid)) break;
         sleep(1);
     }
 
-    if (check_proc_pid(pid) > 0) {
+    if (is_proc_alive(pid)) {
         log_info("Process unresponsive (%ds), forcing termination...", STOP_TIMEOUT);
         kill(pid, SIGKILL);
         for (int i = 0; i < 5; i++) {
-            if (kill(pid, 0) != 0) break;
+            if (!is_proc_alive(pid)) break;
             sleep(1);
         }
     }
 
-    if (kill(pid, 0) == 0) {
+    if (is_proc_alive(pid)) {
         log_error("Failed to terminate process %d", pid);
         return 1;
     }
@@ -1319,6 +1601,12 @@ static int reload_service(void) {
             log_error("Configuration validation failed, aborting reload");
             return 1;
         }
+    }
+
+    if (check_proc_pid(pid, 0) <= 0) {
+        log_error("%s process %d is no longer valid.", SERVICE_NAME, pid);
+        clear_pid();
+        return 1;
     }
 
     log_info("Reloading %s configuration (PID: %d)...", SERVICE_NAME, pid);
@@ -1376,6 +1664,7 @@ static int show_version(void) {
     }
     if (pid == 0) {
         reset_lock_cleanup_signals();
+        release_lock();
         execl(BIN_PATH, BIN_PATH, "version", (char *)NULL);
         _exit(127);
     }
