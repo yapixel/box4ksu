@@ -58,8 +58,7 @@
         "type": "https",
         "server": "cloudflare-dns.com",
         "domain_resolver": "dns-hosts",
-        "detour": "Proxy",
-        "strategy": "ipv4_only"
+        "detour": "Proxy"
       },
       {
         "tag": "dns-direct",
@@ -120,11 +119,11 @@
           "siftscience.com",
           "statsigapi.net"
         ],
-        "action": "reject",
         "domain": [
           "browser-intake-us5-datadoghq.com",
           "cdn.usefathom.com"
-        ]
+        ],
+        "action": "reject"
       },
       {
         "clash_mode": "Direct",
@@ -202,14 +201,14 @@
           "intercom.io",
           "intercomcdn.com"
         ],
-        "action": "route",
-        "server": "dns-proxy",
         "domain": [
           "anthropic-com.ghost.io",
           "anthropic.auth0.com",
           "anthropic.com.cdn.cloudflare.net",
           "servd-anthropic-website.b-cdn.net"
-        ]
+        ],
+        "action": "route",
+        "server": "dns-proxy"
       }
     ],
     "final": "dns-proxy",
@@ -547,11 +546,11 @@
           "siftscience.com",
           "statsigapi.net"
         ],
-        "action": "reject",
         "domain": [
           "browser-intake-us5-datadoghq.com",
           "cdn.usefathom.com"
-        ]
+        ],
+        "action": "reject"
       },
       {
         "domain": [
@@ -614,14 +613,14 @@
           "intercom.io",
           "intercomcdn.com"
         ],
-        "action": "route",
-        "outbound": "Claude",
         "domain": [
           "anthropic-com.ghost.io",
           "anthropic.auth0.com",
           "anthropic.com.cdn.cloudflare.net",
           "servd-anthropic-website.b-cdn.net"
-        ]
+        ],
+        "action": "route",
+        "outbound": "Claude"
       },
       {
         "ip_cidr": [
