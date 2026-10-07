@@ -57,7 +57,8 @@
         "tag": "dns-proxy",
         "type": "tls",
         "server": "1.1.1.1",
-        "detour": "Proxy"
+        "detour": "Proxy",
+        "strategy": "ipv4_only"
       },
       {
         "tag": "dns-direct",
@@ -85,6 +86,17 @@
         "query_type": [
           64,
           65
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          "siftscience.com",
+          "sift.com",
+          "sentry.io",
+          "datadoghq.com",
+          "a-api.anthropic.com",
+          "a-cdn.anthropic.com"
         ],
         "action": "reject"
       },
@@ -124,6 +136,16 @@
           "geosite/anthropic",
           "geosite/google",
           "geosite/google-cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "domain_suffix": [
+          "anthropic.com",
+          "claude.ai",
+          "claude.com",
+          "ant.dev"
         ],
         "action": "route",
         "server": "dns-proxy"
@@ -458,6 +480,17 @@
         "outbound": "HOME-SS"
       },
       {
+        "domain_suffix": [
+          "siftscience.com",
+          "sift.com",
+          "sentry.io",
+          "datadoghq.com",
+          "a-api.anthropic.com",
+          "a-cdn.anthropic.com"
+        ],
+        "action": "reject"
+      },
+      {
         "domain": [
           "snauth.wps.cn"
         ],
@@ -484,7 +517,34 @@
         "action": "reject"
       },
       {
+        "package_name": [
+          "com.anthropic.claude"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "process_name": [
+          "Claude",
+          "Claude Helper",
+          "Claude Helper (Renderer)",
+          "claude"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
         "rule_set": "geosite/anthropic",
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "domain_suffix": [
+          "anthropic.com",
+          "claude.ai",
+          "claude.com",
+          "ant.dev"
+        ],
         "action": "route",
         "outbound": "Claude"
       },
