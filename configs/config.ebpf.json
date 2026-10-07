@@ -89,6 +89,10 @@
         "action": "reject"
       },
       {
+        "domain": [
+          "browser-intake-us5-datadoghq.com",
+          "cdn.usefathom.com"
+        ],
         "domain_suffix": [
           "a-api.anthropic.com",
           "a-cdn.anthropic.com",
@@ -99,10 +103,6 @@
           "sift.com",
           "siftscience.com",
           "statsigapi.net"
-        ],
-        "domain": [
-          "browser-intake-us5-datadoghq.com",
-          "cdn.usefathom.com"
         ],
         "action": "reject"
       },
@@ -147,6 +147,12 @@
         "server": "dns-proxy"
       },
       {
+        "domain": [
+          "anthropic-com.ghost.io",
+          "anthropic.auth0.com",
+          "anthropic.com.cdn.cloudflare.net",
+          "servd-anthropic-website.b-cdn.net"
+        ],
         "domain_suffix": [
           "ant.dev",
           "anthropic.com",
@@ -158,12 +164,6 @@
           "claudeusercontent.com",
           "intercom.io",
           "intercomcdn.com"
-        ],
-        "domain": [
-          "anthropic-com.ghost.io",
-          "anthropic.auth0.com",
-          "anthropic.com.cdn.cloudflare.net",
-          "servd-anthropic-website.b-cdn.net"
         ],
         "action": "route",
         "server": "dns-proxy"
@@ -498,6 +498,10 @@
         "outbound": "HOME-SS"
       },
       {
+        "domain": [
+          "browser-intake-us5-datadoghq.com",
+          "cdn.usefathom.com"
+        ],
         "domain_suffix": [
           "a-api.anthropic.com",
           "a-cdn.anthropic.com",
@@ -508,10 +512,6 @@
           "sift.com",
           "siftscience.com",
           "statsigapi.net"
-        ],
-        "domain": [
-          "browser-intake-us5-datadoghq.com",
-          "cdn.usefathom.com"
         ],
         "action": "reject"
       },
@@ -564,6 +564,12 @@
         "outbound": "Claude"
       },
       {
+        "domain": [
+          "anthropic-com.ghost.io",
+          "anthropic.auth0.com",
+          "anthropic.com.cdn.cloudflare.net",
+          "servd-anthropic-website.b-cdn.net"
+        ],
         "domain_suffix": [
           "ant.dev",
           "anthropic.com",
@@ -575,12 +581,6 @@
           "claudeusercontent.com",
           "intercom.io",
           "intercomcdn.com"
-        ],
-        "domain": [
-          "anthropic-com.ghost.io",
-          "anthropic.auth0.com",
-          "anthropic.com.cdn.cloudflare.net",
-          "servd-anthropic-website.b-cdn.net"
         ],
         "action": "route",
         "outbound": "Claude"
