@@ -89,6 +89,24 @@
         "action": "reject"
       },
       {
+        "domain": [
+          "browser-intake-us5-datadoghq.com",
+          "cdn.usefathom.com"
+        ],
+        "domain_suffix": [
+          "a-api.anthropic.com",
+          "a-cdn.anthropic.com",
+          "datadog.com",
+          "datadoghq.com",
+          "datadoghq.eu",
+          "sentry.io",
+          "sift.com",
+          "siftscience.com",
+          "statsigapi.net"
+        ],
+        "action": "reject"
+      },
+      {
         "clash_mode": "Direct",
         "action": "route",
         "server": "dns-direct"
@@ -124,6 +142,28 @@
           "geosite/anthropic",
           "geosite/google",
           "geosite/google-cn"
+        ],
+        "action": "route",
+        "server": "dns-proxy"
+      },
+      {
+        "domain": [
+          "anthropic-com.ghost.io",
+          "anthropic.auth0.com",
+          "anthropic.com.cdn.cloudflare.net",
+          "servd-anthropic-website.b-cdn.net"
+        ],
+        "domain_suffix": [
+          "ant.dev",
+          "anthropic.com",
+          "clau.de",
+          "claude.ai",
+          "claude.com",
+          "claudemcpclient.com",
+          "claudemcpcontent.com",
+          "claudeusercontent.com",
+          "intercom.io",
+          "intercomcdn.com"
         ],
         "action": "route",
         "server": "dns-proxy"
@@ -459,6 +499,24 @@
       },
       {
         "domain": [
+          "browser-intake-us5-datadoghq.com",
+          "cdn.usefathom.com"
+        ],
+        "domain_suffix": [
+          "a-api.anthropic.com",
+          "a-cdn.anthropic.com",
+          "datadog.com",
+          "datadoghq.com",
+          "datadoghq.eu",
+          "sentry.io",
+          "sift.com",
+          "siftscience.com",
+          "statsigapi.net"
+        ],
+        "action": "reject"
+      },
+      {
+        "domain": [
           "snauth.wps.cn"
         ],
         "action": "reject"
@@ -484,7 +542,54 @@
         "action": "reject"
       },
       {
+        "package_name": [
+          "com.anthropic.claude"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "process_name": [
+          "Claude",
+          "Claude Helper",
+          "Claude Helper (Renderer)",
+          "claude"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
         "rule_set": "geosite/anthropic",
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "domain": [
+          "anthropic-com.ghost.io",
+          "anthropic.auth0.com",
+          "anthropic.com.cdn.cloudflare.net",
+          "servd-anthropic-website.b-cdn.net"
+        ],
+        "domain_suffix": [
+          "ant.dev",
+          "anthropic.com",
+          "clau.de",
+          "claude.ai",
+          "claude.com",
+          "claudemcpclient.com",
+          "claudemcpcontent.com",
+          "claudeusercontent.com",
+          "intercom.io",
+          "intercomcdn.com"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "ip_cidr": [
+          "160.79.104.0/21",
+          "2607:6bc0::/32"
+        ],
         "action": "route",
         "outbound": "Claude"
       },
