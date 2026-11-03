@@ -1,3 +1,0 @@
-# Rust's bundled lld links static musl binaries for any arch, no cross gcc/zig needed
-[target.aarch64-unknown-linux-musl]
-linker = "rust-lld"
