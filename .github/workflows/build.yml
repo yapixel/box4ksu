@@ -2,10 +2,10 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "main", "master", "dev" ]
+    branches: [ "main" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "main", "master", "dev" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
