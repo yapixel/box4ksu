@@ -31,6 +31,7 @@ struct Cfg {
 }
 
 static CFG: OnceLock<Cfg> = OnceLock::new();
+const BOX_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn cfg() -> &'static Cfg {
     CFG.get().expect("config not loaded")
@@ -221,8 +222,12 @@ fn service_cmd(args: &[&str], creds: Option<(u32, u32)>, new_session: bool) -> C
     let c = cfg();
     let mut cmd = Command::new(&c.bin_path);
     cmd.args(args).current_dir(&c.work_dir);
+    // Strip LD_PRELOAD to isolate sing-box from Magisk/Zygisk hooks
+    cmd.env_remove("LD_PRELOAD");
     unsafe {
         cmd.pre_exec(move || {
+            // Ensure files created by sing-box are not world-writable (umask 027)
+            libc::umask(0o027);
             if new_session && libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -498,9 +503,51 @@ fn ts() -> String {
     )
 }
 
+const LOG_BACKUP_KEEP: usize = 3;
+
+fn shift_backups(base: &str, keep: usize) {
+    for i in (2..=keep).rev() {
+        let _ = fs::rename(format!("{base}.{}", i - 1), format!("{base}.{i}"));
+    }
+}
+
+fn rotate_file_in_place(path: &str) -> io::Result<()> {
+    if !Path::new(path).exists() {
+        return Ok(());
+    }
+    shift_backups(path, LOG_BACKUP_KEEP);
+    // Copy and truncate in place (matching atpd) so running sing-box keeps its open O_APPEND fd
+    let res = fs::copy(path, format!("{path}.1"))
+        .and_then(|_| OpenOptions::new().write(true).open(path))
+        .and_then(|f| f.set_len(0));
+    if res.is_err() {
+        fs::rename(path, format!("{path}.1"))?;
+    }
+    Ok(())
+}
+
 fn rotate_log(path: &str) {
     if fs::metadata(path).is_ok_and(|m| m.len() as i64 > cfg().max_log_size) {
-        let _ = fs::rename(path, format!("{path}.1"));
+        let _ = rotate_file_in_place(path);
+    }
+}
+
+fn do_logrotate() -> i32 {
+    let c = cfg();
+    info!("Rotating log files (retaining up to {LOG_BACKUP_KEEP} copies)...");
+    let logs = [&c.log_file, &c.error_log, &c.singbox_log];
+    let mut err = false;
+    for path in logs {
+        if let Err(e) = rotate_file_in_place(path) {
+            error!("Failed to rotate {path}: {e}");
+            err = true;
+        }
+    }
+    if err {
+        1
+    } else {
+        info!("Log rotation completed successfully.");
+        0
     }
 }
 
@@ -770,15 +817,43 @@ fn fmt_uptime(secs: i64) -> String {
     out + &format!("{s}s")
 }
 
+fn core_version() -> Option<String> {
+    let c = cfg();
+    if !access(&c.bin_path, libc::X_OK) {
+        return None;
+    }
+    let out = Command::new(&c.bin_path).arg("version").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next()?.trim();
+    if !line.is_empty() {
+        Some(line.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_io_bytes(s: &str) -> (Option<i64>, Option<i64>) {
+    let get = |prefix: &str| {
+        s.lines().find_map(|l| l.trim_start().strip_prefix(prefix)).map(atoi)
+    };
+    (get("read_bytes:"), get("write_bytes:"))
+}
+
 fn display_status() -> i32 {
     let c = cfg();
     let Some(pid) = get_pid() else {
         info!("{} service is stopped.", c.service_name);
+        if let Some(ver) = core_version() {
+            info!("Core version: {ver}");
+        }
         clear_pid();
         return 1;
     };
 
     info!("{} service is running (PID: {pid})", c.service_name);
+    if let Some(ver) = core_version() {
+        info!("Core version: {ver}");
+    }
     if !c.iana_tz.is_empty() {
         let tm = local_tm();
         let zone_not_utc =
@@ -847,8 +922,7 @@ fn display_status() -> i32 {
     info!("Network sockets: {sockets}");
 
     if let Ok(s) = fs::read_to_string(format!("/proc/{pid}/io")) {
-        let get = |k: &str| s.find(k).map(|i| atoi(&s[i + k.len()..]));
-        if let (Some(r), Some(w)) = (get("read_bytes:"), get("write_bytes:"))
+        if let (Some(r), Some(w)) = parse_io_bytes(&s)
             && r >= 0
             && w >= 0
         {
@@ -1033,11 +1107,14 @@ fn stop_service() -> i32 {
 
     info!("Stopping {name} (PID: {pid})...");
     unsafe { libc::kill(pid, libc::SIGTERM) };
-    for _ in 0..c.stop_timeout {
+
+    // 100ms micro-polling (matching atpd) for sub-second responsive shutdown
+    let attempts = if c.stop_timeout > 0 { c.stop_timeout * 10 } else { 10 };
+    for _ in 0..attempts {
         if !is_proc_alive(pid) {
             break;
         }
-        sleep(Duration::from_secs(1));
+        sleep(Duration::from_millis(100));
     }
 
     if is_proc_alive(pid) {
@@ -1046,11 +1123,11 @@ fn stop_service() -> i32 {
             c.stop_timeout
         );
         unsafe { libc::kill(pid, libc::SIGKILL) };
-        for _ in 0..5 {
+        for _ in 0..50 {
             if !is_proc_alive(pid) {
                 break;
             }
-            sleep(Duration::from_secs(1));
+            sleep(Duration::from_millis(100));
         }
     }
 
@@ -1088,8 +1165,8 @@ fn reload_service() -> i32 {
     let c = cfg();
     let name = &c.service_name;
     let Some(pid) = get_pid() else {
-        error!("{name} is not running.");
-        return 1;
+        info!("{name} is not running, auto-starting...");
+        return start_service();
     };
     if c.check_config == 1 {
         info!("Validating configuration before reload...");
@@ -1099,22 +1176,34 @@ fn reload_service() -> i32 {
         }
     }
     if !check_proc_pid(pid, false) {
-        error!("{name} process {pid} is no longer valid.");
+        info!("{name} process {pid} is no longer valid, auto-starting...");
         clear_pid();
-        return 1;
+        return start_service();
     }
 
     info!("Reloading {name} configuration (PID: {pid})...");
-    if unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
-        info!("Reload signal (SIGHUP) sent successfully.");
-        0
-    } else {
+    if unsafe { libc::kill(pid, libc::SIGHUP) } != 0 {
         error!(
             "Failed to send reload signal: {}",
             io::Error::last_os_error()
         );
-        1
+        return 1;
     }
+
+    // Post-reload health observation: ensure sing-box didn't crash on SIGHUP
+    sleep(Duration::from_millis(500));
+    if !check_proc_pid(pid, false) {
+        error!(
+            "{name} crashed during configuration reload! Check {} for details",
+            c.singbox_log
+        );
+        show_tail(&c.singbox_log, 15);
+        clear_pid();
+        return 1;
+    }
+
+    info!("Reload signal (SIGHUP) processed successfully.");
+    0
 }
 
 fn show_log(target: Option<&str>, lines: i64) {
@@ -1158,43 +1247,56 @@ fn show_log(target: Option<&str>, lines: i64) {
 }
 
 fn show_version() -> i32 {
+    println!("box v{BOX_VERSION}");
     let c = cfg();
     if !access(&c.bin_path, libc::X_OK) {
-        error!("Binary not executable: {}", c.bin_path);
-        return 1;
+        info!("{}: not found or not executable ({})", c.service_name, c.bin_path);
+        return 0;
     }
     match Command::new(&c.bin_path).arg("version").status() {
         Ok(st) => st.code().unwrap_or(1),
-        Err(_) => 127,
+        Err(e) => {
+            error!("Failed to execute {}: {e}", c.bin_path);
+            1
+        }
     }
 }
 
 fn usage(prog: &str) {
     let name = &cfg().service_name;
     println!(
-        "Usage: {prog} {{start|stop|restart|reload|status|check|log [target] [lines]|version}}\n"
+        "Usage: {prog} [-v|--version] [-h|--help]\n       {prog} {{start|stop|restart|reload|status|check|log [target] [lines]|logrotate|version}}\n"
     );
     println!("Commands:");
     println!("  start               - Start {name} service");
     println!("  stop                - Stop {name} service");
     println!("  restart             - Restart {name} service");
-    println!("  reload              - Hot-reload {name} configuration (SIGHUP)");
+    println!("  reload              - Hot-reload {name} configuration (auto-starts if stopped)");
     println!("  status              - Show service status with detailed info");
     println!("  check               - Validate configuration");
     println!("  log [target] [n]    - Show last n lines of logs (default: 50)");
     println!("                        targets: all, sbox (or service), run, error");
-    println!("  version             - Show {name} version");
+    println!("  logrotate           - Rotate service and operational log files (retains 3 copies)");
+    println!("  version             - Show box and {name} versions\n");
+    println!("Options:");
+    println!("  -v, --version       - Show box version");
+    println!("  -h, --help          - Show this help message");
 }
 
 fn run() -> i32 {
-    let Ok(c) = load_config() else { return 1 };
-    let _ = CFG.set(c);
-
     let args: Vec<String> = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     let prog = args.first().map_or("box", String::as_str);
     let arg = |i: usize| args.get(i).map(String::as_str);
+
+    if matches!(arg(1), Some("-v" | "--version")) {
+        println!("box v{BOX_VERSION}");
+        return 0;
+    }
+
+    let Ok(c) = load_config() else { return 1 };
+    let _ = CFG.set(c);
 
     if matches!(arg(1), Some("-h" | "--help" | "help")) {
         usage(prog);
@@ -1213,7 +1315,7 @@ fn run() -> i32 {
         }
     };
 
-    let _lock = matches!(cmd, "start" | "stop" | "restart" | "reload").then(acquire_lock);
+    let _lock = matches!(cmd, "start" | "stop" | "restart" | "reload" | "logrotate" | "rotate").then(acquire_lock);
     match cmd {
         "start" => start_service(),
         "stop" => stop_service(),
@@ -1237,6 +1339,7 @@ fn run() -> i32 {
             show_log(target, lines);
             0
         }
+        "logrotate" | "rotate" => do_logrotate(),
         "version" => show_version(),
         _ => {
             usage(prog);
@@ -1342,5 +1445,35 @@ mod tests {
         assert_eq!(resolve_uid("-1"), None);
         assert_eq!(resolve_uid("4294967295"), Some(u32::MAX));
         assert_eq!(resolve_uid("4294967296"), None);
+    }
+
+    #[test]
+    fn validates_box_version() {
+        assert!(!BOX_VERSION.is_empty());
+        let parts: Vec<&str> = BOX_VERSION.split('.').collect();
+        assert!(parts.len() >= 2);
+        assert!(parts[0].chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn parses_io_bytes_correctly() {
+        let sample = "rchar: 100\nwchar: 200\nsyscr: 1\nsyscw: 2\nread_bytes: 1048576\nwrite_bytes: 2097152\ncancelled_write_bytes: 524288\n";
+        let (r, w) = parse_io_bytes(sample);
+        assert_eq!(r, Some(1048576));
+        assert_eq!(w, Some(2097152));
+    }
+
+    #[test]
+    fn shifts_backups_correctly() {
+        let dir = std::env::temp_dir().join(format!("box_rotate_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let base = dir.join("test.log").to_string_lossy().into_owned();
+        let _ = fs::write(format!("{base}.1"), "first");
+        let _ = fs::write(format!("{base}.2"), "second");
+        shift_backups(&base, 3);
+        assert_eq!(fs::read_to_string(format!("{base}.3")).unwrap(), "second");
+        assert_eq!(fs::read_to_string(format!("{base}.2")).unwrap(), "first");
+        assert!(!Path::new(&format!("{base}.1")).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -123,8 +123,12 @@ chmod 755 /data/adb/service.d/sing-box.sh
 /data/adb/sing-box/box log sbox 50     # Last 50 lines of the sing-box core log
 /data/adb/sing-box/box log all 50      # All logs (run / error / service)
 
-# Show the sing-box version
+# Rotate logs manually (retains 3 backup copies via copy-truncate)
+/data/adb/sing-box/box logrotate
+
+# Show manager and sing-box core versions
 /data/adb/sing-box/box version
+/data/adb/sing-box/box -v
 
 # Show help
 /data/adb/sing-box/box help
@@ -150,6 +154,7 @@ The `status` command shows the following:
 | Field | Description | Source |
 |------|------|----------|
 | PID | Process ID | `/proc/[pid]/` |
+| Core version | sing-box core version | `sing-box version` |
 | Timezone | Current timezone and offset | Android system property / `box.ini` |
 | Memory usage | VmRSS, actual physical memory in use | `/proc/[pid]/status` |
 | CPU usage | Average CPU usage of the process | `/proc/[pid]/stat` |
@@ -161,6 +166,7 @@ The `status` command shows the following:
 
 ```text
 [2026-08-28 08:30:00] [INFO] sing-box service is running (PID: 12345)
+[2026-08-28 08:30:00] [INFO] Core version: sing-box version 1.11.0
 [2026-08-28 08:30:00] [INFO] Timezone: Asia/Shanghai (UTC+08:00)
 [2026-08-28 08:30:00] [INFO] Memory usage: 42.50 MB
 [2026-08-28 08:30:00] [INFO] CPU usage: 0.5% (avg)
