@@ -19,8 +19,6 @@ jobs:
         include:
           - target: aarch64-unknown-linux-musl
             arch: arm64
-          - target: x86_64-unknown-linux-musl
-            arch: amd64
 
     steps:
       - name: Checkout repository
@@ -30,7 +28,6 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Run unit tests
-        if: matrix.arch == 'amd64'
         run: cargo test
 
       - name: Build static binary and package tarball (${{ matrix.arch }})
