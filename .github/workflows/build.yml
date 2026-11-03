@@ -17,25 +17,27 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: aarch64-linux-musl
+          - target: aarch64-unknown-linux-musl
             arch: arm64
-          - target: x86_64-linux-musl
+          - target: x86_64-unknown-linux-musl
             arch: amd64
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Zig
-        run: |
-          ZIG_VER="0.13.0"
-          curl -sSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" | tar -xJ -C /tmp
-          echo "/tmp/zig-linux-x86_64-${ZIG_VER}" >> $GITHUB_PATH
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Run unit tests
+        if: matrix.arch == 'amd64'
+        run: cargo test
 
       - name: Build static binary and package tarball (${{ matrix.arch }})
         run: |
           # 1. Compile native pure static binary
-          zig cc -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -target ${{ matrix.target }} -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none -o box box.c
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/box box
           chmod 755 box
           echo "=== file ==="
           file box
@@ -106,10 +108,15 @@ jobs:
           echo "NDK_DIR=${NDK_DIR}" >> $GITHUB_ENV
           echo "TOOLCHAIN=${TOOLCHAIN}" >> $GITHUB_ENV
           echo "CC=${CC}" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC}" >> $GITHUB_ENV
+
+      - name: Install Rust target
+        run: rustup target add aarch64-linux-android
 
       - name: Build Android Bionic binary
         run: |
-          $CC -Wall -Wextra -Wpedantic -Oz -o box box.c
+          cargo build --release --target aarch64-linux-android
+          cp target/aarch64-linux-android/release/box box
           chmod 755 box
           cp box box-bionic
 

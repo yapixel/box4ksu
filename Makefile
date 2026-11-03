@@ -1,24 +1,19 @@
-ifeq ($(origin CC),default)
-CC = zig cc
-endif
-CC ?= zig cc
-TARGET_TRIPLE ?= aarch64-linux-musl
-CFLAGS ?= -Wall -Wextra -Oz -flto -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident
-LDFLAGS ?= -static -Wl,-s -Wl,--gc-sections -Wl,--build-id=none
-TARGET = box
-SRC = box.c
+TARGET ?= aarch64-unknown-linux-musl
 PREFIX ?= /data/adb/sing-box
 
-all: $(TARGET)
+all:
+	cargo build --release --target $(TARGET)
+	cp target/$(TARGET)/release/box box
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -target $(TARGET_TRIPLE) $(LDFLAGS) -o $(TARGET) $(SRC)
+test:
+	cargo test
 
 clean:
-	rm -f $(TARGET)
+	cargo clean
+	rm -f box
 
-install: $(TARGET)
+install: all
 	install -d $(PREFIX)
-	install -m 755 $(TARGET) $(PREFIX)/$(TARGET)
+	install -m 755 box $(PREFIX)/box
 
-.PHONY: all clean install
+.PHONY: all test clean install
