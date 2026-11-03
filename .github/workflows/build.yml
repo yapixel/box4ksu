@@ -59,7 +59,6 @@ jobs:
           # Rebuild std from source with panic_abort to strip dead std machinery and optimize binary size
           cargo build --release \
             -Z build-std=std,panic_abort \
-            -Z build-std-features=panic_immediate_abort \
             --target aarch64-linux-android
           cp target/aarch64-linux-android/release/box box
           chmod 755 box
